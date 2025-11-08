@@ -1,24 +1,61 @@
-```python
-# backend_api.py - Flask Backend for Multi-Annotation Chemotaxonomy Platform (corrected & improved)
-from flask import Flask, request, jsonify, send_file, after_this_request
+# backend_api.py - Flask Backend for Multi-Annotation Chemotaxonomy Platform
+# -------------------------------------------------------------------------
+# Features:
+# - Parses multiple annotation formats (GFF3/Prokka, RAST TSV, Bakta TSV,
+#   DRAM TSV, HMMER tblout, GenBank GBK, generic TSV).
+# - Detects chemotaxonomic markers (quinones, fatty acids, polar lipids,
+#   cell-wall polymers, sphingolipids, hopanoids, carotenoids, etc.).
+# - Optional phylum filter to limit searches to taxa-relevant markers.
+# - Generates JSON results and a Markdown -> PDF/DOCX report via Pandoc.
+# - “AI report” is optional; if no API key is configured, it safely falls back.
+#
+# Requirements (requirements.txt minimal set):
+# flask
+# flask-cors
+# biopython
+# pypandoc
+# requests
+# gunicorn
+#
+# Run (local):
+#   export PORT=5000
+#   python backend_api.py
+#
+# Docker (example):
+#   docker build -t chemotax:latest .
+#   docker run -p 10000:10000 -e PORT=10000 chemotax:latest
+# -------------------------------------------------------------------------
+
+from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 from Bio import SeqIO
-import io, re, csv, os, tempfile, requests, json
+
+import io
+import re
+import csv
+import os
+import tempfile
+import requests
+import json
 import pypandoc
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Optional
 
+# -----------------------------------------------------------------------------
+# Flask app
+# -----------------------------------------------------------------------------
 app = Flask(__name__)
-# (Optionally) limit uploads (e.g., 50 MB): app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 CORS(app, resources={r"/api/*": {"origins": "*"}}, expose_headers=["Content-Disposition"])
 
-# ------------------------------ Annotation Parsing ------------------------------
+# -----------------------------------------------------------------------------
+# Annotation Parsing
+# -----------------------------------------------------------------------------
 class AnnotationParser:
     @staticmethod
     def parse_gff3(content, source_name='gff3'):
         genes = []
-        for line in content.splitlines():
+        for line in content.split('\n'):
             if line.startswith('#') or not line.strip():
                 continue
             fields = line.split('\t')
@@ -29,12 +66,17 @@ class AnnotationParser:
                 if '=' in attr:
                     key, value = attr.split('=', 1)
                     attributes[key.strip()] = value.strip()
+            def _to_int(s):
+                try:
+                    return int(s)
+                except Exception:
+                    return None
             gene_info = {
                 'seqid': fields[0],
                 'source': fields[1],
                 'type': fields[2],
-                'start': int(fields[3]) if fields[3].isdigit() else None,
-                'end': int(fields[4]) if fields[4].isdigit() else None,
+                'start': _to_int(fields[3]),
+                'end': _to_int(fields[4]),
                 'strand': fields[6],
                 'gene': attributes.get('gene', attributes.get('Gene', attributes.get('Name', ''))),
                 'product': attributes.get('product', attributes.get('Product', '')),
@@ -122,41 +164,30 @@ class AnnotationParser:
 
     @staticmethod
     def parse_hmmer(content):
-        # Parses HMMER domtblout-like lines (ignores comment lines)
         genes = []
-        for line in content.splitlines():
+        # Assumes HMMER domtblout-like columns (23+), but is lenient.
+        for line in content.split('\n'):
             if line.startswith('#') or not line.strip():
                 continue
-            # domtblout has many columns; keep it robust:
             fields = line.strip().split()
-            if len(fields) < 18:
+            if len(fields) < 7:
                 continue
             target_name = fields[0]
             target_acc = fields[1] if len(fields) > 1 else ''
-            query_name = fields[3] if len(fields) > 3 else ''
-            evalue = fields[6] if len(fields) > 6 else '1'
-            score = fields[7] if len(fields) > 7 else '0'
-            # Description is after column 22 typically; join the tail safely
-            descr = ""
-            if len(fields) > 22:
-                descr = " ".join(fields[22:])
+            query_name = fields[3] if len(fields) > 3 else target_name
+            try:
+                evalue = float(fields[6]) if len(fields) > 6 else 1.0
+            except Exception:
+                evalue = 1.0
             pfam_acc = target_acc if target_acc.startswith('PF') else ''
-            try:
-                evalue_f = float(evalue)
-            except ValueError:
-                evalue_f = 1.0
-            try:
-                score_f = float(score)
-            except ValueError:
-                score_f = 0.0
-
+            product = ' '.join(fields[22:]) if len(fields) > 22 else ''
             genes.append({
                 'target_name': target_name,
                 'target_accession': target_acc,
                 'query_name': query_name,
-                'evalue': evalue_f,
-                'score': score_f,
-                'product': descr,
+                'evalue': evalue,
+                'score': float(fields[7]) if len(fields) > 7 else 0.0,
+                'product': product,
                 'gene': query_name,
                 'pfam': pfam_acc,
                 'pfam_list': [pfam_acc] if pfam_acc else [],
@@ -173,11 +204,14 @@ class AnnotationParser:
                 for feature in record.features:
                     if feature.type in ["CDS", "gene"]:
                         q = feature.qualifiers
+                        start = int(feature.location.start) if feature.location else None
+                        end = int(feature.location.end) if feature.location else None
+                        strand = feature.location.strand if feature.location else None
                         genes.append({
                             'type': feature.type,
-                            'start': int(feature.location.start),
-                            'end': int(feature.location.end),
-                            'strand': feature.location.strand,
+                            'start': start,
+                            'end': end,
+                            'strand': strand,
                             'gene': (q.get('gene', ['']) or [''])[0],
                             'product': (q.get('product', ['']) or [''])[0],
                             'locus_tag': (q.get('locus_tag', ['']) or [''])[0],
@@ -217,29 +251,36 @@ class AnnotationParser:
             print(f"Error parsing TSV: {e}")
         return genes
 
-# ------------------------------ Marker Detection ------------------------------
+# -----------------------------------------------------------------------------
+# Marker Detection
+# -----------------------------------------------------------------------------
 class MarkerDetector:
     def __init__(self):
         self.marker_database = self._load_marker_database()
         self.alias_to_canon, self.canon_to_aliases = self._build_alias_maps()
 
+    def _build_alias_maps(self):
+        # Minimal alias table; extend as needed
+        alias_table = {
+            'menG': {'ubiE'},
+            'ubiE': {'menG'},
+            'idsA': {'ddsA'},
+            'ddsA': {'idsA'},
+            # quinone O2-independent helpers sometimes named differently
+            'ubit': set(), 'ubiu': set(), 'ubiv': set(), 'ubik': set(),
+        }
+        alias_to_canon = {}
+        canon_to_aliases = defaultdict(set)
+        for canon, aliases in alias_table.items():
+            canon_to_aliases[canon].update(aliases)
+            for a in aliases:
+                alias_to_canon[a] = canon
+            alias_to_canon[canon] = canon
+        return alias_to_canon, canon_to_aliases
+
     @staticmethod
     def _clean_token(s: str) -> str:
         return re.sub(r'[^a-z0-9]+', '', (s or '').lower())
-
-    def _build_alias_maps(self):
-        # Normalize all alias names to cleaned lowercase alnum to prevent case/punct mismatches
-        alias_table_raw = {'menG': {'ubiE'}, 'ubiE': {'menG'}, 'idsA': {'ddsA'}, 'ddsA': {'idsA'}}
-        alias_to_canon = {}
-        canon_to_aliases = defaultdict(set)
-        for canon_raw, aliases_raw in alias_table_raw.items():
-            canon = self._clean_token(canon_raw)
-            for a_raw in {*(aliases_raw), canon_raw}:
-                a = self._clean_token(a_raw)
-                alias_to_canon[a] = canon
-                if a != canon:
-                    canon_to_aliases[canon].add(a)
-        return alias_to_canon, canon_to_aliases
 
     def _canon_gene(self, name: str, product: str = '') -> str:
         if not name and not product:
@@ -247,93 +288,201 @@ class MarkerDetector:
         n = self._clean_token(name)
         if n in self.alias_to_canon:
             return self.alias_to_canon[n]
-        # Try product text keyword hits for alias names
         prod = (product or '').lower()
         for alias in self.alias_to_canon.keys():
-            if alias and re.search(r'\b' + re.escape(alias) + r'\b', self._clean_token(prod)):
+            if alias and re.search(r'\b' + re.escape(alias) + r'\b', prod):
                 return self.alias_to_canon[alias]
         return n
 
+    # -------------------- EXPANDED DATABASE --------------------
     def _load_marker_database(self):
-        # Curated, minimal excerpt (extend as needed)
+        # Expanded marker coverage across key chemotaxonomic domains.
+        # Each subcategory lists representative genes/EC/keywords/PFAMs.
         return {
             'fattyAcids': {
-                'name': 'Fatty Acids & Mycolic Acids',
+                'name': 'Fatty Acids & Related Lipids',
                 'mycolic': {
                     'genes': ['pks13','fadD32','accD4','acpM','kasA','kasB','inhA','mabA','hadA','hadB','hadC','fbpA','fbpB','fbpC','mmpL3'],
                     'ec': ['1.3.1.9','1.1.1.100','2.3.1.41'],
                     'keywords': ['mycolic acid','FAS-II','mycoloyltransferase'],
-                    'taxa': ['Actinobacteria','Actinobacteriota','Corynebacteriales']
+                    'taxa': ['Actinobacteria','Actinobacteriota','Corynebacteriales'],
+                    'pfam': []
                 },
                 'anteiso_bfa': {
                     'genes': ['bkdAA','bkdAB','bkdC','ilvE','leuA','leuB','leuC','leuD','fabH'],
                     'ec': ['1.2.4.4','2.3.1.168','1.3.1.60','2.6.1.42','2.3.3.13','4.2.1.33'],
                     'keywords': ['branched-chain fatty acid','anteiso-','BCFA','2-methylbutyryl-CoA'],
-                    'taxa': ['Bacillota','Firmicutes']
+                    'taxa': ['Bacillota','Firmicutes'],
+                    'pfam': []
+                },
+                'unsaturated_UFA': {
+                    'genes': ['fabA','fabB','desA','desB'],
+                    'ec': [],
+                    'keywords': ['unsaturated fatty acid','UFA','desaturase'],
+                    'taxa': [],
+                    'pfam': []
+                },
+                'cyclopropane_CFA': {
+                    'genes': ['cfa'],
+                    'ec': ['2.1.1.-'],
+                    'keywords': ['cyclopropane fatty acid','CFA synthase'],
+                    'taxa': [],
+                    'pfam': []
                 }
             },
+
             'quinones': {
                 'name': 'Respiratory Quinones',
                 'menaquinone_classical': {
                     'genes': ['menF','menD','menH','menC','menE','menB','menI','menA','menG','ubiE','menJ'],
                     'ec': ['2.5.1.74','6.2.1.26','1.2.1.45','4.1.3.36','4.1.1.63','4.2.1.113','2.5.1.30','2.1.1.163'],
                     'keywords': ['menaquinone','vitamin K2','demethylmenaquinone'],
-                    'taxa': ['Firmicutes','Bacillota','Actinobacteria','Actinobacteriota','Bacteroidetes','Bacteroidota','Proteobacteria','Pseudomonadota']
+                    'taxa': ['Firmicutes','Bacillota','Actinobacteria','Actinobacteriota','Bacteroidetes','Bacteroidota','Proteobacteria','Pseudomonadota'],
+                    'pfam': []
+                },
+                'menaquinone_futalosine': {
+                    'genes': ['mqnA','mqnB','mqnC','mqnD','mqnE','mqnL'],
+                    'ec': [],
+                    'keywords': ['futalosine pathway','alternative menaquinone'],
+                    'taxa': [],
+                    'pfam': []
                 },
                 'ubiquinone': {
                     'genes': ['ubiA','ubiB','ubiC','ubiD','ubiX','ubiE','ubiF','ubiG','ubiH','ubiI','ubiJ','coq7'],
                     'ec': ['2.5.1.39','2.1.1.64','1.1.1.152','3.3.2.11','4.1.1.64','2.1.1.114','1.14.13.36'],
-                    'keywords': ['ubiquinone','coenzyme Q','4-hydroxybenzoate','O2-independent ubiquinone'],
-                    'taxa': ['Proteobacteria','Pseudomonadota','Acidobacteria','Chlorobi']
+                    'keywords': ['ubiquinone','coenzyme Q','4-hydroxybenzoate'],
+                    'taxa': ['Proteobacteria','Pseudomonadota','Acidobacteria','Chlorobi'],
+                    'pfam': []
+                },
+                'ubiquinone_O2_independent': {
+                    'genes': ['ubiT','ubiU','ubiV','ubiK'],
+                    'ec': [],
+                    'keywords': ['oxygen-independent ubiquinone','anaerobic ubiquinone','UbiU','UbiV','UbiT'],
+                    'taxa': [],
+                    'pfam': []
                 }
             },
+
             'polarLipids': {
-                'name': 'Polar Lipids',
+                'name': 'Polar & Amino Lipids',
                 'phosphatidylethanolamine_PE': {
                     'genes': ['pssA','psd'],
                     'ec': ['2.7.8.8','4.1.1.65'],
                     'keywords': ['phosphatidylethanolamine','PE','phosphatidylserine decarboxylase','CDP-diacylglycerol-serine O-phosphatidyltransferase'],
-                    'taxa': ['Proteobacteria','Pseudomonadota']
+                    'taxa': ['Proteobacteria','Pseudomonadota'],
+                    'pfam': []
                 },
                 'phosphatidylglycerol_PG': {
                     'genes': ['pgsA','pgpA','pgpB'],
                     'ec': ['2.7.8.5','3.1.3.27'],
                     'keywords': ['phosphatidylglycerol','PG','phosphatidylglycerophosphate synthase'],
-                    'taxa': []
+                    'taxa': [],
+                    'pfam': []
                 },
                 'cardiolipin_CL': {
                     'genes': ['clsA','clsB','clsC','plsC'],
                     'ec': ['2.7.8.-','2.3.1.15','3.1.1.3'],
                     'keywords': ['cardiolipin','diphosphatidylglycerol','cardiolipin synthase'],
-                    'taxa': []
+                    'taxa': [],
+                    'pfam': []
+                },
+                'phosphatidylcholine_PC': {
+                    'genes': ['pcs','pmtA','pmtB'],
+                    'ec': [],
+                    'keywords': ['phosphatidylcholine','PC','phospholipid N-methyltransferase','CDP-choline'],
+                    'taxa': [],
+                    'pfam': []
+                },
+                'ornithine_lysine_lipids': {
+                    'genes': ['olsA','olsB','olsE'],
+                    'ec': [],
+                    'keywords': ['ornithine lipid','lysine lipid','OL','LL'],
+                    'taxa': [],
+                    'pfam': []
+                },
+                'sphingolipids': {
+                    'genes': ['sptA','sptB','cerS'],
+                    'ec': [],
+                    'keywords': ['sphingolipid','ceramide','serine palmitoyltransferase'],
+                    'taxa': ['Bacteroidetes','Bacteroidota'],
+                    'pfam': []
                 }
             },
+
             'cellWall': {
-                'name': 'Cell Wall Components',
+                'name': 'Cell Wall & Surface Polymers',
                 'peptidoglycan_A1_gamma': {
                     'genes': ['murA','murB','murC','murD','murE','murF','murG','mraY','murJ','ddl','mepM','pbp'],
                     'ec': ['2.5.1.7','6.3.2.4','6.3.2.7','6.3.2.13','6.3.2.15','6.3.2.10','2.4.1.129','2.7.8.13','3.4.16.4'],
-                    'keywords': ['peptidoglycan','murein','D-alanyl-D-alanine ligase','L-Lysine'],
-                    'taxa': ['Proteobacteria','Pseudomonadota']
+                    'keywords': ['peptidoglycan','murein','D-alanyl-D-alanine ligase','m-DAP'],
+                    'taxa': ['Proteobacteria','Pseudomonadota'],
+                    'pfam': []
                 },
                 'peptidoglycan_A4_alpha': {
                     'genes': ['murA','murB','murC','murD','murE','murF','murG','mraY','murJ','ddl','lysA','pbp'],
                     'ec': ['2.5.1.7','6.3.2.4','6.3.2.7','6.3.2.13','6.3.2.15','6.3.2.8','2.4.1.129','2.7.8.13','4.1.1.20'],
-                    'keywords': ['peptidoglycan','murein','DAP-pathway','meso-diaminopimelate','diaminopimelic acid'],
-                    'taxa': ['Bacillota','Firmicutes']
+                    'keywords': ['peptidoglycan','murein','DAP-pathway','meso-diaminopimelate','L-Lys'],
+                    'taxa': ['Bacillota','Firmicutes'],
+                    'pfam': []
                 },
                 'teichoic_acid': {
-                    'genes': ['tagA','tagB','tagD','tagE','tagF','tagO','dltA','dltB','dltC','dltD'],
+                    'genes': ['tagA','tagB','tagD','tagE','tagF','tagO','dltA','dltB','dltC','dltD','ltaS'],
                     'ec': ['2.7.8.12','2.4.1.55','6.1.1.13','2.3.1.196'],
                     'keywords': ['teichoic acid','wall teichoic acid','lipoteichoic acid','D-alanylation'],
-                    'taxa': ['Bacillota','Firmicutes']
+                    'taxa': ['Bacillota','Firmicutes'],
+                    'pfam': []
+                },
+                'LPS_LipidA_core': {
+                    'genes': ['lpxA','lpxB','lpxC','lpxD','lpxK','kdtA','lpxL','lpxM'],
+                    'ec': [],
+                    'keywords': ['lipid A','Kdo transferase','LPS core'],
+                    'taxa': ['Proteobacteria','Pseudomonadota'],
+                    'pfam': []
+                },
+                'LPS_O_antigen': {
+                    'genes': ['waaC','waaF','waaG','waaL','wzx','wzy','wzz'],
+                    'ec': [],
+                    'keywords': ['O-antigen','LPS O-antigen','O-antigen polymerase'],
+                    'taxa': ['Proteobacteria','Pseudomonadota'],
+                    'pfam': []
+                },
+                'arabinogalactan_LAM': {
+                    'genes': ['embA','embB','embC','glfT1','glfT2','aftA','aftB','aftC','dprE1','dprE2','ubiA'],
+                    'ec': [],
+                    'keywords': ['arabinogalactan','lipoarabinomannan','decaprenylphosphoryl arabinose'],
+                    'taxa': ['Actinobacteria','Corynebacteriales','Actinobacteriota'],
+                    'pfam': []
+                }
+            },
+
+            'triterpenoids': {
+                'name': 'Membrane Triterpenoids',
+                'hopanoids': {
+                    'genes': ['shc','hpnC','hpnD','hpnE','hpnF','hpnH','hpnI','hpnJ','hpnK'],
+                    'ec': [],
+                    'keywords': ['hopanoid','squalene-hopene cyclase','bacterial hopanoids'],
+                    'taxa': [],
+                    'pfam': []
+                }
+            },
+
+            'pigments': {
+                'name': 'Pigments',
+                'carotenoids': {
+                    'genes': ['crtE','crtB','crtI','crtY','crtZ'],
+                    'ec': [],
+                    'keywords': ['carotenoid','lycopene','beta-carotene'],
+                    'taxa': [],
+                    'pfam': []
                 }
             }
         }
 
     def find_markers(self, all_genes, allowed_taxa: Optional[List[str]] = None):
         found_markers = defaultdict(lambda: {'subcategories': {}})
-        allowed = {t.strip().lower() for t in allowed_taxa} if allowed_taxa else None
+        allowed = None
+        if allowed_taxa:
+            allowed = {t.strip().lower() for t in allowed_taxa if t}
 
         gene_index = defaultdict(list)
         product_index = defaultdict(list)
@@ -359,11 +508,14 @@ class MarkerDetector:
             ec = gene.get('ec_number', '')
             if ec:
                 for ec_num in re.findall(r'[\d\.-]+', ec):
-                    if ec_num.count('.') >= 2:  # simple EC plausibility check
+                    if ec_num.count('.') >= 2:  # basic EC check
                         ec_index[ec_num].append((idx, gene))
+            # HMMER/DRAM PFAM hits
             if gene.get('pfam_list'):
                 for pf in gene.get('pfam_list'):
                     pfam_index[pf].append((idx, gene))
+            if gene.get('pfam'):
+                pfam_index[gene.get('pfam')].append((idx, gene))
 
         def _ec_matches_query(query_ec: str):
             if '-' not in query_ec and '*' not in query_ec:
@@ -382,21 +534,19 @@ class MarkerDetector:
                     continue
                 if allowed is not None:
                     taxa_list = [t.lower() for t in marker_data.get('taxa', [])]
-                    if taxa_list and allowed.isdisjoint(set(taxa_list)):
+                    if taxa_list and allowed.isdisjoint(taxa_list):
                         continue
 
                 found_set, sources = set(), []
 
-                # Gene name matches + alias expansion
+                # Genes
                 for marker_gene in marker_data.get('genes', []):
-                    mg_norm = self._clean_token(marker_gene)
-                    names_to_try = {mg_norm}
-                    names_to_try |= self.canon_to_aliases.get(mg_norm, set())
-                    if mg_norm in self.alias_to_canon:
-                        canon = self.alias_to_canon[mg_norm]
-                        names_to_try.add(canon)
-                        names_to_try |= self.canon_to_aliases.get(canon, set())
-
+                    mg = self._clean_token(marker_gene)
+                    names_to_try = {mg}
+                    names_to_try |= self.canon_to_aliases.get(mg, set())
+                    if mg in self.alias_to_canon:
+                        names_to_try.add(self.alias_to_canon[mg])
+                        names_to_try |= self.canon_to_aliases.get(self.alias_to_canon[mg], set())
                     for name_try in names_to_try:
                         matches = gene_index.get(name_try, [])
                         for _, gene in matches:
@@ -408,7 +558,7 @@ class MarkerDetector:
                                 'product': gene.get('product', '')
                             })
 
-                # EC matches (supports prefixes like 1.3.5.- or *)
+                # EC
                 for ec_num in marker_data.get('ec', []):
                     matches = _ec_matches_query(ec_num)
                     for _, gene in matches:
@@ -421,7 +571,7 @@ class MarkerDetector:
                             'product': gene.get('product', '')
                         })
 
-                # Keyword matches (token + fulltext)
+                # Keywords
                 for keyword in marker_data.get('keywords', []):
                     kw_lower = keyword.lower()
                     kw_tokens = set(re.findall(r'[\w\.-]+', kw_lower))
@@ -433,7 +583,6 @@ class MarkerDetector:
                         for idx, full_product_text in product_fulltext:
                             if kw_lower in full_product_text:
                                 potential_matches.add(idx)
-
                     for idx in potential_matches:
                         gene = all_genes[idx]
                         product_tokens = set(re.findall(r'[\w\.-]+', (gene.get('product', '') or '').lower()))
@@ -447,7 +596,7 @@ class MarkerDetector:
                                 'product': gene.get('product', '')
                             })
 
-                # PFAM matches
+                # PFAMs
                 for pf in marker_data.get('pfam', []):
                     matches = pfam_index.get(pf, [])
                     for _, gene in matches:
@@ -468,87 +617,154 @@ class MarkerDetector:
                     total = len(total_genes | total_ec | total_kw | total_pfam)
 
                     found_markers[category]['subcategories'][subcat] = {
-                        'found': sorted(list(found_set)),
+                        'found': list(found_set),
                         'total': total,
                         'percentage': round((len(found_set) / total * 100), 1) if total else 0.0,
                         'sources': sources
                     }
 
-        return {k: v for k, v in found_markers.items() if v['subcategories']}
+        found_markers = {k: v for k, v in found_markers.items() if v['subcategories']}
+        return dict(found_markers)
 
-# ------------------------------ Prediction Logic ------------------------------
+# -----------------------------------------------------------------------------
+# Predictions
+# -----------------------------------------------------------------------------
 def get_pathway_completeness(found_markers, category, subcategory):
     try:
         return float(found_markers[category]['subcategories'][subcategory]['percentage'])
     except KeyError:
         return 0.0
 
+def _subcat_data(found_markers, cat, sub):
+    return found_markers.get(cat, {}).get('subcategories', {}).get(sub, {'found': [], 'sources': []})
+
 def generate_predictions(found_markers):
+    """
+    Rules support:
+      - 'subcategory' (single)
+      - 'subcategories' (list of (category, subcategory) tuples)
+      - 'alt_groups': list of lists of (category, subcategory) tuples (use the best in each group)
+    """
     rules = [
+        # Corynebacteriales-type wall signature
         {
-            'id': 'actinobacteria_mycolic',
-            'name': 'Mycolic Acid Profile (Actinobacteria-type)',
-            'category': 'fattyAcids',
-            'subcategory': 'mycolic',
-            'min_completeness': 30,
-            'ijsem': 'Cell wall contains mycolic acids.'
+            'id': 'corynebacteriales_wall',
+            'name': 'Corynebacteriales Cell Envelope (Mycolic + Arabinogalactan/LAM)',
+            'ijsem': 'Cell wall with arabinogalactan–mycolic acids (Corynebacteriales-type).',
+            'min_completeness': 25,
+            'subcategories': [('fattyAcids', 'mycolic'), ('cellWall', 'arabinogalactan_LAM')]
         },
+
+        # Gram-Positive (Firmicutes-type)
         {
             'id': 'gram_positive_profile',
             'name': 'Gram-Positive Profile (Firmicutes-type)',
+            'ijsem': 'Typical Gram-positive cell wall polymer (teichoic acids) and MK quinones.',
             'min_completeness': 30,
-            'ijsem': 'Typical Gram-Positive cell wall and lipid profile.',
-            'subcategories': [
-                ('cellWall', 'teichoic_acid'),
-                ('cellWall', 'peptidoglycan_A4_alpha'),
-                ('quinones', 'menaquinone_classical')
-            ]
+            'subcategories': [('cellWall', 'peptidoglycan_A4_alpha'), ('cellWall', 'teichoic_acid')],
+            'alt_groups': [[('quinones', 'menaquinone_classical'), ('quinones', 'menaquinone_futalosine')]]
         },
+
+        # Gram-Negative (Proteobacteria-type)
         {
             'id': 'gram_negative_profile',
             'name': 'Gram-Negative Profile (Proteobacteria-type)',
+            'ijsem': 'Outer membrane with LPS (lipid A) and ubiquinone quinones.',
             'min_completeness': 30,
-            'ijsem': 'Typical Gram-Negative cell wall and lipid profile.',
-            'subcategories': [
-                ('cellWall', 'peptidoglycan_A1_gamma'),
-                ('quinones', 'ubiquinone'),
-                ('polarLipids', 'phosphatidylethanolamine_PE')
-            ]
+            'subcategories': [('cellWall', 'peptidoglycan_A1_gamma'), ('cellWall', 'LPS_LipidA_core')],
+            'alt_groups': [[('quinones', 'ubiquinone'), ('quinones', 'ubiquinone_O2_independent')]]
+        },
+
+        # Sphingolipid-rich Bacteroidota tendency
+        {
+            'id': 'bacteroidota_sphingo',
+            'name': 'Sphingolipid-Positive Profile (Bacteroidota tendency)',
+            'ijsem': 'Presence of bacterial sphingolipids (e.g., serine palmitoyltransferase).',
+            'min_completeness': 20,
+            'subcategories': [('polarLipids', 'sphingolipids')]
+        },
+
+        # Hopanoids
+        {
+            'id': 'hopanoid_presence',
+            'name': 'Hopanoid Biosynthesis',
+            'ijsem': 'Hopanoid biosynthetic capacity detected.',
+            'min_completeness': 20,
+            'subcategories': [('triterpenoids', 'hopanoids')]
+        },
+
+        # Carotenoids
+        {
+            'id': 'carotenoid_presence',
+            'name': 'Carotenoid Pigments',
+            'ijsem': 'Carotenoid pigment biosynthetic genes present.',
+            'min_completeness': 20,
+            'subcategories': [('pigments', 'carotenoids')]
+        },
+
+        # Classic mycolic-only rule for Actinobacteria signal
+        {
+            'id': 'actinobacteria_mycolic',
+            'name': 'Mycolic Acid Profile (Actinobacteria-type)',
+            'ijsem': 'Cell wall contains mycolic acids.',
+            'min_completeness': 30,
+            'category': 'fattyAcids',
+            'subcategory': 'mycolic'
         }
     ]
+
     predictions = []
 
     for rule in rules:
         matched_markers = []
         sources = []
         total_completeness = 0.0
-        num_subcats = 0
+        group_count = 0
 
-        if 'subcategory' in rule:  # single subcategory rule
+        # single subcategory rule
+        if 'subcategory' in rule and 'category' in rule:
             completeness = get_pathway_completeness(found_markers, rule['category'], rule['subcategory'])
-            if completeness >= rule['min_completeness']:
-                subcat_data = found_markers[rule['category']]['subcategories'][rule['subcategory']]
-                matched_markers = subcat_data['found']
-                sources = subcat_data['sources']
-                total_completeness = completeness
-                num_subcats = 1
+            if completeness > 0:
+                sd = _subcat_data(found_markers, rule['category'], rule['subcategory'])
+                matched_markers.extend(sd.get('found', []))
+                sources.extend(sd.get('sources', []))
+                total_completeness += completeness
+                group_count += 1
 
-        elif 'subcategories' in rule:  # multi-subcategory rule
-            for cat, subcat in rule['subcategories']:
-                completeness = get_pathway_completeness(found_markers, cat, subcat)
-                if completeness > 0:
-                    total_completeness += completeness
-                    subcat_data = found_markers[cat]['subcategories'][subcat]
-                    matched_markers.extend(subcat_data['found'])
-                    sources.extend(subcat_data['sources'])
-                num_subcats += 1
+        # multi required subcategories
+        for cat, sub in rule.get('subcategories', []):
+            completeness = get_pathway_completeness(found_markers, cat, sub)
+            # count the group whether present or not, to penalize missing modules less aggressively we still include it,
+            # but you can switch to: if completeness > 0: group_count += 1
+            group_count += 1
+            if completeness > 0:
+                sd = _subcat_data(found_markers, cat, sub)
+                matched_markers.extend(sd.get('found', []))
+                sources.extend(sd.get('sources', []))
+                total_completeness += completeness
 
-        if num_subcats > 0:
-            avg_completeness = total_completeness / num_subcats
+        # alternative groups: choose best per group
+        for group in rule.get('alt_groups', []):
+            group_best = 0.0
+            group_best_sd = None
+            for cat, sub in group:
+                c = get_pathway_completeness(found_markers, cat, sub)
+                if c > group_best:
+                    group_best = c
+                    group_best_sd = _subcat_data(found_markers, cat, sub) if c > 0 else None
+            # always count a group (present or not) for averaging
+            group_count += 1
+            if group_best_sd:
+                matched_markers.extend(group_best_sd.get('found', []))
+                sources.extend(group_best_sd.get('sources', []))
+                total_completeness += group_best
+
+        if group_count > 0:
+            avg_completeness = total_completeness / group_count
             if avg_completeness >= rule['min_completeness']:
                 predictions.append({
-                    **rule,
-                    'matchedMarkers': sorted(list(set(matched_markers))),
+                    **{k: v for k, v in rule.items() if k not in ('subcategories', 'alt_groups', 'category', 'subcategory')},
+                    'matchedMarkers': sorted(set(matched_markers)),
                     'confidence': round(avg_completeness, 1),
                     'sources': sources
                 })
@@ -574,55 +790,70 @@ def identify_novel_features(found_markers):
         })
     return novel
 
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def _normalize_phylum_param(raw_val: Optional[str]) -> Optional[List[str]]:
     if not raw_val:
         return None
     vals = [v.strip() for v in raw_val.split(',') if v.strip()]
     synonyms = {
         'actinobacteriota': 'Actinobacteria',
+        'actino': 'Actinobacteria',
+        'proteobacteria': 'Proteobacteria',
         'pseudomonadota': 'Proteobacteria',
+        'firmicutes': 'Firmicutes',
         'bacillota': 'Firmicutes',
-        'bacteroidota': 'Bacteroidetes'
+        'bacteroidetes': 'Bacteroidetes',
+        'bacteroidota': 'Bacteroidetes',
+        'cyanobacteria': 'Cyanobacteria',
+        'chloroflexi': 'Chloroflexi',
+        'chloroflexota': 'Chloroflexi',
+        'corynebacteriales': 'Corynebacteriales'
     }
     mapped = []
     for v in vals:
         v_lower = v.lower()
-        mapped.append(synonyms.get(v_lower, v_lower.capitalize()))
-    return list(set(mapped)) or None
+        mapped.append(synonyms.get(v_lower, v.strip()))
+    seen, out = set(), []
+    for x in mapped:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out or None
 
-# ------------------------------ Core Analysis ------------------------------
 def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
     parser = AnnotationParser()
     detector = MarkerDetector()
     all_genes, file_info = [], []
-
     for file, format_type in zip(files, formats):
         try:
             content = file.read().decode('utf-8', errors='replace')
         except Exception as e:
-            return {'error': f"Error reading file {getattr(file, 'filename', 'unknown')}: {e}"}
+            return {'error': f"Error reading file {file.filename}: {e}"}
 
-        filename = getattr(file, 'filename', 'unknown')
-        format_type = (format_type or '').strip().lower()
-        if format_type in ['gff3', 'prokka']:
-            genes = parser.parse_gff3(content, format_type)
-        elif format_type == 'rast':
+        filename = file.filename
+        genes = []
+        ft = (format_type or '').lower()
+        if ft in ['gff3', 'prokka']:
+            genes = parser.parse_gff3(content, ft)
+        elif ft == 'rast':
             genes = parser.parse_rast(content)
-        elif format_type == 'bakta':
+        elif ft == 'bakta':
             genes = parser.parse_bakta_tsv(content)
-        elif format_type == 'dram':
+        elif ft == 'dram':
             genes = parser.parse_dram(content)
-        elif format_type == 'hmm':
+        elif ft == 'hmm':
             genes = parser.parse_hmmer(content)
-        elif format_type == 'gbk':
+        elif ft == 'gbk':
             genes = parser.parse_genbank(content)
-        elif format_type == 'tsv':
+        elif ft == 'tsv':
             genes = parser.parse_generic_tsv(content)
         else:
-            return {'error': f'Unsupported format: {format_type} for file {filename}'}
+            return {'error': f'Unsupported format: {format_type} for {filename}'}
 
         all_genes.extend(genes)
-        file_info.append({'name': filename, 'format': format_type, 'geneCount': len(genes)})
+        file_info.append({'name': filename, 'format': ft, 'geneCount': len(genes)})
 
     if not all_genes:
         return {'error': "No features could be parsed from the uploaded files. Please check file formats."}
@@ -643,28 +874,33 @@ def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
     }
     return result
 
-# ------------------------------ Report Generation ------------------------------
+# -----------------------------------------------------------------------------
+# Reports
+# -----------------------------------------------------------------------------
 def _build_template_report(result: dict) -> str:
     ts = result.get('timestamp')
+    ts_str = ''
     try:
-        ts_fmt = datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:%M') if ts else datetime.now().strftime('%Y-%m-%d %H:%M')
+        ts_str = datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:%M')
     except Exception:
-        ts_fmt = datetime.now().strftime('%Y-%m-%d %H:%M')
+        ts_str = datetime.now().strftime('%Y-%m-%d %H:%M')
 
     lines = []
-    lines.append("# Genome-resolved Chemotaxonomy Report")
-    lines.append(f"_Generated: {ts_fmt}_")
+    lines.append(f"# Genome-resolved Chemotaxonomy Report")
+    lines.append(f"_Generated: {ts_str}_")
     if result.get('phylum'):
-        lines.append(f"**Scope (phylum):** {', '.join(result['phylum'])}")
+        lines.append(f"**Scope (phylum/order filter):** {', '.join(result['phylum'])}")
     lines.append("\n---\n")
+
     lines.append("## 1. Introduction")
-    lines.append("This report summarizes chemotaxonomic features predicted from the provided genome annotations. The analysis searches for key genes and pathways involved in biosynthesis of taxonomically significant compounds—respiratory quinones, fatty acids, polar lipids, and cell wall components.")
+    lines.append("This report summarizes the chemotaxonomic features predicted from the provided genome annotations. The analysis searches for key genes and pathways involved in the biosynthesis of taxonomically significant compounds (respiratory quinones, fatty acids, polar lipids, cell wall polymers, sphingolipids, hopanoids, pigments).")
+
     lines.append("\n## 2. Methods")
-    lines.append("Parsed genomic features were searched against a curated database of marker genes, EC numbers, PFAMs, and keywords.")
-    lines.append("Processed files:")
+    lines.append("Parsed genomic features were searched against a curated database of marker genes, EC numbers, keywords, and PFAMs. The following files were processed:")
     for f in result['files']:
         lines.append(f"- **{f['name']}** ({f['format']}): {f['geneCount']} features")
     lines.append(f"\nA total of **{result['totalGenes']} features** were parsed and analyzed.")
+
     lines.append("\n## 3. Results & Discussion")
     lines.append("\n### 3.1. Chemotaxonomic Predictions")
     if result['predictions']:
@@ -672,9 +908,14 @@ def _build_template_report(result: dict) -> str:
             lines.append(f"- **{p['name']}**")
             lines.append(f"  - **Confidence:** {p['confidence']}%")
             lines.append(f"  - **IJSEM Note:** {p['ijsem']}")
-            lines.append(f"  - **Key Matched Markers:** {', '.join(list(set(p['matchedMarkers']))[:5])}...")
+            if p.get('matchedMarkers'):
+                preview = ', '.join(list(p['matchedMarkers'])[:8])
+                if len(p['matchedMarkers']) > 8:
+                    preview += ", …"
+                lines.append(f"  - **Key Matched Markers:** {preview}")
     else:
-        lines.append("- No high-confidence chemotaxonomic profiles were matched.")
+        lines.append("- No high-confidence chemotaxonomic profiles were matched at current thresholds.")
+
     lines.append("\n### 3.2. Detailed Marker Findings (by category)")
     if result['foundMarkers']:
         for cat, cat_data in result['foundMarkers'].items():
@@ -683,6 +924,7 @@ def _build_template_report(result: dict) -> str:
                 lines.append(f"- **{sub}**: {sub_data['percentage']}% complete ({len(sub_data['found'])}/{sub_data['total']})")
     else:
         lines.append("- No chemotaxonomic markers from the database were detected.")
+
     lines.append("\n### 3.3. Notable Features")
     if result['novelFeatures']:
         for block in result['novelFeatures']:
@@ -691,25 +933,30 @@ def _build_template_report(result: dict) -> str:
                 lines.append(f"  - {feat['category']} / {feat['subcategory']}: {feat['percentage']}% complete")
     else:
         lines.append("- No pathways were flagged as highly complete at current thresholds.")
+
     lines.append("\n## 4. Conclusion")
-    lines.append("These in-silico predictions provide a preliminary chemotaxonomic profile. Validate with laboratory analyses (e.g., HPLC, MS) before drawing formal conclusions.")
+    lines.append("This in-silico analysis provides a preliminary chemotaxonomic profile. The predictions and marker findings should be validated with laboratory-based chemical analyses (e.g., HPLC, GC-MS, LC-MS/MS).")
+
     return "\n".join(lines)
 
 def _generate_ai_report(result: dict) -> str:
     """
-    Safe AI generation: only runs if GEMINI_API_KEY is provided; otherwise falls back to the template.
+    Optional AI narrative. If GEMINI_API_KEY is not set or request fails,
+    we return the template report. Designed to never crash.
     """
     fallback_report = _build_template_report(result)
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         return fallback_report
 
     try:
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={api_key}"
         system_prompt = (
             "You are a helpful assistant specialized in microbial taxonomy and chemotaxonomy. "
-            "Write a professional, concise report with headings (##) for Introduction, Methods, Results and Discussion, and Conclusion. "
-            "Interpret predictions (e.g., Gram-Negative Profile), and discuss pathway completeness."
+            "Write a professional, concise narrative report from the provided JSON. "
+            "Use Markdown headings: Introduction, Methods, Results and Discussion, Conclusion. "
+            "Interpret key predictions (e.g., Gram-negative with LPS & ubiquinone), "
+            "discuss pathway completeness and chemotaxonomic meaning."
         )
         prompt_data = {
             'inputs': result.get('files', []),
@@ -718,42 +965,41 @@ def _generate_ai_report(result: dict) -> str:
             'marker_findings': result.get('foundMarkers', {}),
             'notable_features': result.get('novelFeatures', [])
         }
-        user_prompt = f"Generate a chemotaxonomy report from this JSON:\n\n{json.dumps(prompt_data, indent=2)}"
-
+        user_prompt = f"Generate a full chemotaxonomy report for this JSON:\n\n{json.dumps(prompt_data, indent=2)}"
         payload = {
             "contents": [{"parts": [{"text": user_prompt}]}],
             "systemInstruction": {"parts": [{"text": system_prompt}]}
         }
         headers = {"Content-Type": "application/json"}
-
         resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
         if resp.status_code != 200:
-            print(f"AI generation failed: {resp.status_code} {resp.text}")
+            print(f"AI report generation failed: {resp.status_code} {resp.text}")
             return fallback_report
-
         data = resp.json()
         text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
         return text or fallback_report
     except Exception as e:
-        print(f"AI generation error: {e}")
+        print(f"AI report error: {e}")
         return fallback_report
 
-# ------------------------------ API Endpoints ------------------------------
+# -----------------------------------------------------------------------------
+# API Endpoints
+# -----------------------------------------------------------------------------
 @app.route('/')
 def index():
-    # Serve a static index if present; otherwise simple message
-    if os.path.exists('index.html'):
-        return send_file('index.html')
-    return "index.html not found. API is running.", 200
+    try:
+        with open('index.html', 'r', encoding='utf-8') as f:
+            return render_template_string(f.read())
+    except FileNotFoundError:
+        return "index.html not found", 404
 
 @app.route('/api/analyze-multi', methods=['POST'])
 def analyze_multiple_annotations():
     if 'files' not in request.files:
         return jsonify({'error': 'No files uploaded'}), 400
     files = request.files.getlist('files')
-    formats = [f.lower() for f in request.form.getlist('formats')]
-    phylum_param = request.form.get('phylum')
-
+    formats = request.form.getlist('formats')
+    phylum_param = request.form.get('phylum', '')
     if len(files) != len(formats):
         return jsonify({'error': 'Number of files and formats must match'}), 400
 
@@ -768,85 +1014,92 @@ def analyze_and_report():
         return jsonify({'error': 'No files uploaded'}), 400
 
     files = request.files.getlist('files')
-    formats = [f.lower() for f in request.form.getlist('formats')]
-    phylum_param = request.form.get('phylum')
-
-    req_format = request.args.get('format', 'pdf').lower()
+    formats = request.form.getlist('formats')
+    phylum_param = request.form.get('phylum', '')
+    # Accept format from query OR form (frontend uses query)
+    req_format = (request.args.get('format') or request.form.get('format') or 'pdf').lower()
     if req_format not in ['pdf', 'docx']:
         return jsonify({'error': 'Invalid format requested. Must be pdf or docx.'}), 400
 
-    use_ai = request.form.get('use_ai', 'false').lower() == 'true'
+    use_ai = (request.form.get('use_ai', 'false').lower() == 'true')
 
     if len(files) != len(formats):
         return jsonify({'error': 'Number of files and formats must match'}), 400
 
-    # Run analysis
+    # Run the analysis
     result = _analyze_uploaded(files, formats, phylum_param)
     if 'error' in result:
         return jsonify(result), 400
 
-    # Generate Markdown report
+    # Build Markdown (AI or template)
     print(f"Generating report. AI enabled: {use_ai}")
     markdown_string = _generate_ai_report(result) if use_ai else _build_template_report(result)
     print("Markdown generation complete.")
 
-    # Convert via Pandoc
+    md_file = None
+    out_file = None
     try:
-        # Temporary files
-        md_fd, md_path = tempfile.mkstemp(suffix='.md')
-        with os.fdopen(md_fd, 'w', encoding='utf-8') as md_file:
+        # Temp markdown
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as md_file:
             md_file.write(markdown_string)
+            md_file_path = md_file.name
 
-        out_fd, out_path = tempfile.mkstemp(suffix=f'.{req_format}')
-        os.close(out_fd)  # pypandoc writes to the path itself
+        # Temp output
+        with tempfile.NamedTemporaryFile(suffix=f'.{req_format}', delete=False) as out_file:
+            out_file_path = out_file.name
 
+        # Pandoc conversion
         print(f"Converting Markdown to {req_format} using Pandoc...")
         pandoc_args = []
         if req_format == 'pdf':
-            # Use XeLaTeX for robust Unicode (Tamil) rendering and set fonts
-            pandoc_args = [
-                '--pdf-engine=xelatex',
-                '-V', 'mainfont=Noto Sans Tamil',
-                '-V', 'sansfont=Noto Sans',
-                '-V', 'monofont=DejaVu Sans Mono'
-            ]
+            # pdflatex is safest with minimal font deps
+            pandoc_args = ['--pdf-engine=pdflatex', '-V', 'geometry:margin=1in']
 
         pypandoc.convert_file(
-            md_path,
+            md_file_path,
             req_format,
-            outputfile=out_path,
+            outputfile=out_file_path,
             extra_args=pandoc_args
         )
         print("Pandoc conversion successful.")
-
-        # Schedule cleanup after response is sent
-        @after_this_request
-        def cleanup(response):
-            for p in (md_path, out_path):
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except Exception as ce:
-                    print(f"Temp cleanup error for {p}: {ce}")
-            return response
 
         mimetype_map = {
             'pdf': 'application/pdf',
             'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         }
         fname = f"chemotax_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{req_format}"
-        return send_file(out_path, mimetype=mimetype_map[req_format], as_attachment=True, download_name=fname)
+
+        return send_file(
+            out_file_path,
+            mimetype=mimetype_map[req_format],
+            as_attachment=True,
+            download_name=fname
+        )
 
     except Exception as e:
         print(f"Error during file conversion or sending: {e}")
         return jsonify({'error': f'Failed to generate report file: {e}'}), 500
+    finally:
+        # Cleanup
+        try:
+            if md_file and os.path.exists(md_file.name):
+                os.remove(md_file.name)
+        except Exception:
+            pass
+        try:
+            if out_file and os.path.exists(out_file.name):
+                os.remove(out_file.name)
+        except Exception:
+            pass
+        print("Temporary files cleaned up.")
 
 @app.route('/health', methods=['GET'])
-@app.route('/healthz', methods=['GET'])  # alias for container health checks
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    # For local development only; in Docker, Gunicorn runs this app
+    # For local development only (Docker/hosted will use CMD entrypoint)
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
-```
