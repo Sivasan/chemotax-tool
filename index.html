@@ -3,363 +3,391 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Genome-resolved Chemotaxonomy</title>
+    <title>Genome-Resolved Chemotaxonomy</title>
     <!-- Load Tailwind CSS -->
-    <script src="[https://cdn.tailwindcss.com](https://cdn.tailwindcss.com)"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                    },
-                },
-            }
-        }
-    </script>
-    <!-- Icons -->
-    <script type="module" src="[https://unpkg.com/lucide-react@latest/dist/esm/lucide-react.js](https://unpkg.com/lucide-react@latest/dist/esm/lucide-react.js)"></script>
-    <script nomodule src="[https://unpkg.com/lucide-react@latest/dist/umd/lucide-react.js](https://unpkg.com/lucide-react@latest/dist/umd/lucide-react.js)"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Alpine.js for simple UI interactions -->
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
-        /* Simple spinner animation */
+        /* Simple keyframe for spinning */
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         .spinner {
-            border: 2px solid rgba(0, 0, 0, 0.1);
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            border-left-color: #0ea5e9;
             animation: spin 1s linear infinite;
         }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+        /* Hide scrollbar for file list */
+        #file-list::-webkit-scrollbar { display: none; }
+        #file-list { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
+    <script>
+        function chemotaxApp() {
+            return {
+                files: [],
+                phylum: '',
+                isLoading: false,
+                error: null,
+                results: null,
+                apiBaseUrl: '/api',
+
+                handleFileSelect(event) {
+                    this.error = null;
+                    this.results = null;
+                    const newFiles = Array.from(event.target.files).map(file => ({
+                        fileObject: file,
+                        name: file.name,
+                        size: file.size,
+                        format: '' // Default format to be selected
+                    }));
+                    this.files = [...this.files, ...newFiles];
+                    event.target.value = null;
+                },
+
+                removeFile(index) {
+                    this.files.splice(index, 1);
+                },
+
+                async submitForm(event, endpoint = '/analyze-multi') {
+                    this.isLoading = true;
+                    this.error = null;
+                    this.results = null;
+
+                    if (this.files.some(f => !f.format)) {
+                        this.error = 'Please select a format for every file.';
+                        this.isLoading = false;
+                        return;
+                    }
+
+                    const formData = new FormData();
+                    this.files.forEach(file => {
+                        formData.append('files', file.fileObject, file.name);
+                        formData.append('formats', file.format);
+                    });
+                    formData.append('phylum', this.phylum);
+
+                    try {
+                        const response = await fetch(this.apiBaseUrl + endpoint, {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            const errData = await response.json();
+                            throw new Error(errData.error || `Server error: ${response.status}`);
+                        }
+                        
+                        const data = await response.json();
+                        this.results = data;
+
+                    } catch (err) {
+                        this.error = `Analysis failed: ${err.message}`;
+                        console.error(err);
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+
+                async downloadReport() {
+                    this.isLoading = true;
+                    this.error = null;
+
+                    if (this.files.length === 0) {
+                        this.error = 'Please add files before downloading a report.';
+                        this.isLoading = false;
+                        return;
+                    }
+                    if (this.files.some(f => !f.format)) {
+                        this.error = 'Please select a format for every file.';
+                        this.isLoading = false;
+                        return;
+                    }
+
+                    const formData = new FormData();
+                    this.files.forEach(file => {
+                        formData.append('files', file.fileObject, file.name);
+                        formData.append('formats', file.format);
+                    });
+                    formData.append('phylum', this.phylum);
+
+                    try {
+                        const response = await fetch(this.apiBaseUrl + '/analyze-and-report', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            const errData = await response.json();
+                            throw new Error(errData.error || `Server error: ${response.status}`);
+                        }
+
+                        const blob = await response.blob();
+                        const contentDisposition = response.headers.get('content-disposition');
+                        let filename = 'chemotax_report.md';
+                        if (contentDisposition) {
+                            const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
+                            if (filenameMatch && filenameMatch.length === 2) {
+                                filename = filenameMatch[1];
+                            }
+                        }
+                        
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = filename;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        window.URL.revokeObjectURL(url);
+
+                    } catch (err) {
+                        this.error = `Report download failed: ${err.message}`;
+                        console.error(err);
+                    } finally {
+                        this.isLoading = false;
+                    }
+                }
+            };
+        }
+    </script>
 </head>
-<body class="h-full font-sans antialiased text-gray-900">
-    <div class="flex flex-col min-h-screen">
-        <!-- Header -->
-        <header class="bg-white shadow-sm">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="flex justify-between items-center h-16">
-                    <div class="flex items-center space-x-2">
-                        <!-- Simple DNA Icon -->
-                        <svg class="w-8 h-8 text-sky-600" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2ZM8 11a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-5ZM12 8a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V8ZM16 5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V5Z"/></svg>
-                        <h1 class="text-2xl font-bold text-gray-800">Chemotaxonomy Tool</h1>
-                    </div>
-                </div>
-            </div>
-        </header>
+<body class="h-full font-sans text-gray-800">
+    <div x-data="chemotaxApp()" class="min-h-screen p-4 md:p-8 bg-gray-50">
+        <div class="max-w-6xl mx-auto">
 
-        <!-- Main Content -->
-        <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-10">
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-12">
-
-                <!-- Left Column: Upload & Options -->
-                <div class="space-y-6">
-                    <h2 class="text-xl font-semibold text-gray-700">1. Upload Annotation Files</h2>
-                    <!-- File list container -->
-                    <div id="file-list" class="space-y-4">
-                        <!-- File rows will be injected here by JS -->
-                    </div>
-                    <button id="add-file-btn" type="button" class="w-full flex justify-center items-center space-x-2 px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500">
-                        <svg class="w-5 h-5" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clip-rule="evenodd" /></svg>
-                        <span>Add Another File</span>
-                    </button>
-
-                    <h2 class="text-xl font-semibold text-gray-700 pt-4">2. Options</h2>
+            <!-- Header -->
+            <header class="mb-8 p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                <div class="flex flex-col md:flex-row justify-between items-center">
                     <div>
-                        <label for="phylum-input" class="block text-sm font-medium text-gray-700">Target Phylum (Optional)</label>
-                        <input type="text" id="phylum-input" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-sky-500 focus:border-sky-500 sm:text-sm" placeholder="e.g., Actinobacteria, Firmicutes">
-                        <p class="mt-2 text-xs text-gray-500">Comma-separated. Restricts search to markers relevant to these taxa.</p>
+                        <h1 class="text-3xl font-bold text-gray-900">Genome-Resolved Chemotaxonomy</h1>
+                        <p class="mt-1 text-lg text-gray-600">Analyze genome annotations to predict chemotaxonomic markers.</p>
                     </div>
+                    <svg class="w-16 h-16 text-blue-600 mt-4 md:mt-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M11.35 3.836c-.065.22-.1.448-.1.684 0 .414.04.818.115 1.206l-1.64 1.64a.25.25 0 00-.06.177l-.096 1.123a.25.25 0 00.059.212l1.64 1.64a.25.25 0 00.177.06l1.123-.096a.25.25 0 00.212-.059l1.64-1.64c.388.075.792.115 1.206.115.236 0 .464-.035.684-.1l1.64-1.64a.25.25 0 00.06-.177l.096-1.123a.25.25 0 00-.059-.212l-1.64-1.64a.25.25 0 00-.177-.06l-1.123.096a.25.25 0 00-.212.059L12 3.951l-.65-.115z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M17.589 15.006l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.006 17.589l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12.422 20.172l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.75 10.25c.236 0 .464.035.684.1l1.64 1.64a.25.25 0 01.06.177l.096 1.123a.25.25 0 01-.059.212l-1.64 1.64a.25.25 0 01-.177.06l-1.123-.096a.25.25 0 01-.212-.059l-1.64-1.64c-.388-.075-.792-.115-1.206-.115-.236 0-.464.035-.684.1l-1.64 1.64a.25.25 0 01-.06.177l-.096 1.123a.25.25 0 01-.059.212l-1.64 1.64a.25.25 0 01-.177.06l-1.123-.096a.25.25 0 01-.212-.059l-1.64-1.64c-.388-.075-.792-.115-1.206-.115-.236 0-.464.035-.684.1l-1.64 1.64a.25.25 0 01-.06.177l-.096 1.123a.25.25 0 01-.059.212l-1.64 1.64a.25.25 0 01-.177.06l-1.123-.096a.25.25 0 01-.212-.059L3.95 19.75l-.115.65c-.065.22-.1.448-.1.684 0 .414.04.818.115 1.206l-1.64 1.64a.25.25 0 01-.06.177l-.096 1.123a.25.25 0 01.059.212l1.64 1.64a.25.25 0 01.177.06l1.123-.096a.25.25 0 01.212-.059l1.64-1.64c.388.075.792.115 1.206.115.236 0 .464-.035.684-.1l1.64-1.64a.25.25 0 01.06-.177l.096-1.123a.25.25 0 01-.059-.212l-1.64-1.64a.25.25 0 01-.177-.06l-1.123.096a.25.25 0 01-.212-.059L12 19.895l.65.115c.22.065.448.1.684.1.414 0 .818-.04 1.206-.115l1.64 1.64a.25.25 0 00.177.06l1.123-.096a.25.25 0 00.212-.059l1.64-1.64c.388.075.792.115 1.206.115.236 0 .464-.035.684-.1l1.64-1.64a.25.25 0 00.06-.177l.096-1.123a.25.25 0 00-.059-.212l-1.64-1.64a.25.25 0 00-.177-.06l-1.123.096a.25.25 0 00-.212-.059l-1.64 1.64c-.388.075-.792-.115-1.206.115-.236 0-.464-.035-.684-.1l-1.64-1.64a.25.25 0 00-.06-.177l-.096-1.123a.25.25 0 00-.059-.212l1.64-1.64a.25.25 0 00.177-.06l1.123.096a.25.25 0 00.212-.059L19.75 10.25z" />
+                    </svg>
+                </div>
+            </header>
 
-                    <h2 class="text-xl font-semibold text-gray-700 pt-4">3. Run Analysis</h2>
-                    <div class="flex flex-col sm:flex-row gap-4">
-                        <button id="analyze-btn" type="button" class="flex-1 inline-flex justify-center items-center px-6 py-3 border border-transparent rounded-md shadow-sm text-base font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500">
-                            <span class="spinner hidden mr-2"></span>
-                            <span>Analyze (View JSON)</span>
-                        </button>
-                        <button id="report-btn" type="button" class="flex-1 inline-flex justify-center items-center px-6 py-3 border border-gray-300 rounded-md shadow-sm text-base font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500">
-                            <span class="spinner hidden mr-2"></span>
-                            <span>Download Report (.md)</span>
-                        </button>
-                    </div>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+                <!-- Left Column: Input Form -->
+                <div class="lg:col-span-1 space-y-6">
+                    <form @submit.prevent="submitForm()" id="upload-form" class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                        <!-- File Upload -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">1. Add Annotation Files</label>
+                            <div class="mt-2 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg">
+                                <div class="space-y-1 text-center">
+                                    <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                                        <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.5-3.5M28 8v8h8m-4-4H12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                                    </svg>
+                                    <p class="text-sm text-gray-600">
+                                        <label for="file-upload" class="relative cursor-pointer bg-white rounded-md font-medium text-blue-600 hover:text-blue-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500">
+                                            <span>Click to upload</span>
+                                            <input id="file-upload" name="files" type="file" class="sr-only" multiple @change="handleFileSelect">
+                                        </label>
+                                    </p>
+                                    <p class="text-xs text-gray-500">GFF3, RAST, DRAM, HMM, GBK, TSV</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- File List -->
+                        <div x-show="files.length > 0" class="mt-4 space-y-3 max-h-60 overflow-y-auto" id="file-list">
+                            <template x-for="(file, index) in files" :key="index">
+                                <div class="flex items-center p-3 bg-gray-50 rounded-lg border border-gray-200">
+                                    <div class="flex-shrink-0">
+                                        <svg class="w-5 h-5 text-gray-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h8a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 1a1 1 0 00-1 1v10a1 1 0 001 1h8a1 1 0 001-1V6a1 1 0 00-1-1H6z" clip-rule="evenodd" /></svg>
+                                    </div>
+                                    <div class="ml-3 flex-1 min-w-0">
+                                        <p class-="text-sm font-medium text-gray-800 truncate" x-text="file.name"></p>
+                                        <p class="text-xs text-gray-500" x-text="`${(file.size / 1024).toFixed(1)} KB`"></p>
+                                    </div>
+                                    <div class="ml-3">
+                                        <label :for="'format-' + index" class="sr-only">Format</label>
+                                        <select :id="'format-' + index" x-model="file.format" class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm text-xs">
+                                            <option value="">Select Format</option>
+                                            <option value="gff3">GFF3 (Prokka)</option>
+                                            <option value="gbk">GenBank (GBK)</option>
+                                            <option value="rast">RAST (TSV)</option>
+                                            <option value="bakta">Bakta (TSV)</option>
+                                            <option value="dram">DRAM (TSV)</option>
+                                            <option value="hmm">HMMER (tblout)</option>
+                                            <option value="tsv">Generic TSV</option>
+                                        </select>
+                                    </div>
+                                    <button @click="removeFile(index)" type="button" class="ml-2 p-1 text-gray-400 hover:text-gray-600">
+                                        <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>
+                                    </button>
+                                </div>
+                            </template>
+                        </div>
+
+                        <!-- Phylum Filter -->
+                        <div class="mt-6">
+                            <label for="phylum" class="block text-sm font-medium text-gray-700">2. Phylum Filter (Optional)</label>
+                            <input type="text" id="phylum" x-model="phylum" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm" placeholder="e.g., Proteobacteria, Actinobacteria">
+                            <p class="mt-1 text-xs text-gray-500">Comma-separated. Helps refine marker search.</p>
+                        </div>
+
+                        <!-- Buttons -->
+                        <div class="mt-8 pt-5 border-t border-gray-200">
+                            <div class="flex justify-end space-x-3">
+                                <button @click="downloadReport" :disabled="isLoading" type="button" class="inline-flex justify-center items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50">
+                                    Download Report (.md)
+                                </button>
+                                <button :disabled="isLoading || files.length === 0" type="submit" class="inline-flex justify-center items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50">
+                                    <!-- Show spinner when loading -->
+                                    <template x-if="isLoading">
+                                        <svg class="spinner w-5 h-5 mr-2 -ml-1 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                    </template>
+                                    <span x-text="isLoading ? 'Analyzing...' : 'Analyze & View Results'"></span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
                 </div>
 
                 <!-- Right Column: Results -->
-                <div class="space-y-6">
-                    <h2 class="text-xl font-semibold text-gray-700">Results</h2>
-                    <!-- Message/Error Box -->
-                    <div id="message-box" class="hidden p-4 rounded-md"></div>
-                    
-                    <!-- JSON Output Area -->
-                    <div class="bg-gray-900 rounded-md shadow-sm overflow-hidden">
-                        <div class="px-4 py-2 bg-gray-800 text-xs font-mono text-gray-400">
-                            JSON Output
+                <div class="lg:col-span-2">
+                    <!-- Error Message -->
+                    <template x-if="error">
+                        <div class="p-4 bg-red-50 rounded-lg border border-red-300">
+                            <h3 class="text-lg font-medium text-red-800">Analysis Failed</h3>
+                            <p class="mt-1 text-sm text-red-700" x-text="error"></p>
                         </div>
-                        <pre id="json-output" class="p-4 text-xs text-green-300 font-mono overflow-x-auto h-96">Awaiting analysis...</pre>
-                    </div>
-                </div>
+                    </template>
 
-            </div>
-        </main>
+                    <!-- Loading State Placeholder -->
+                    <template x-if="isLoading">
+                        <div class="grid grid-cols-1 gap-6">
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200 animate-pulse">
+                                <div class="h-6 bg-gray-200 rounded-md w-1/3 mb-4"></div>
+                                <div class="h-4 bg-gray-200 rounded-md w-1/2"></div>
+                            </div>
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200 animate-pulse">
+                                <div class="h-6 bg-gray-200 rounded-md w-1/3 mb-4"></div>
+                                <div class="h-4 bg-gray-200 rounded-md w-3/4 mb-2"></div>
+                                <div class="h-4 bg-gray-200 rounded-md w-1/2"></div>
+                            </div>
+                        </div>
+                    </template>
 
-        <!-- Footer -->
-        <footer class="bg-white border-t border-gray-200 mt-12">
-            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div class="py-4 text-center text-sm text-gray-500">
-                    Chemotaxonomy Tool
-                </div>
-            </div>
-        </footer>
-    </div>
+                    <!-- 
+                    FIX: Replaced x-show with x-if.
+                    x-if will *not* render the contents until `results` is truthy (not null).
+                    This prevents the "Cannot read properties of null" error on page load.
+                    -->
+                    <template x-if="results && !isLoading">
+                        <div class="space-y-6">
+                            <!-- Summary Card -->
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                                <h2 class="text-xl font-semibold text-gray-900">Analysis Summary</h2>
+                                <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <span class="block text-sm text-gray-500">Input Files</span>
+                                        <span class="block text-lg font-medium text-gray-800" x-text="results.files.length"></span>
+                                    </div>
+                                    <div>
+                                        <span class="block text-sm text-gray-500">Total Features Parsed</span>
+                                        <span class="block text-lg font-medium text-gray-800" x-text="results.totalGenes"></span>
+                                    </div>
+                                    <div>
+                                        <span class="block text-sm text-gray-500">Phylum Filter</span>
+                                        <span class="block text-lg font-medium text-gray-800" x-text="results.phylum ? results.phylum.join(', ') : 'None'"></span>
+                                    </div>
+                                </div>
+                            </div>
 
-    <!-- File Row Template -->
-    <template id="file-row-template">
-        <div class="file-row p-4 border border-gray-200 rounded-md bg-white shadow-sm">
-            <div class="flex flex-col sm:flex-row sm:items-center sm:space-x-4">
-                <div class="flex-grow mb-2 sm:mb-0">
-                    <label class="block text-sm font-medium text-gray-700 sr-only">File</label>
-                    <input type="file" class="file-input block w-full text-sm text-gray-500
-                        file:mr-4 file:py-2 file:px-4
-                        file:rounded-md file:border-0
-                        file:text-sm file:font-semibold
-                        file:bg-sky-50 file:text-sky-700
-                        hover:file:bg-sky-100" required>
-                </div>
-                <div class="flex-shrink-0">
-                    <label class="block text-sm font-medium text-gray-700 sr-only">Format</label>
-                    <select class="format-select mt-1 block w-full sm:w-auto pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-sky-500 focus:border-sky-500 sm:text-sm rounded-md" required>
-                        <option value="">Select format...</option>
-                        <option value="gff3">GFF3 (generic)</option>
-                        <option value="prokka">Prokka (.gff)</option>
-                        <option value="bakta">Bakta (.gff3 or .tsv)</option>
-                        <option value="rast">RAST (.tsv)</option>
-                        <option value="dram">DRAM (.tsv)</option>
-                        <option value="gbk">GenBank (.gbk)</option>
-                        <option value="hmm">HMMER (domtblout)</option>
-                        <option value="tsv">Generic TSV</option>
-                    </select>
-                </div>
-                <div class="flex-shrink-0 mt-2 sm:mt-0">
-                    <button type="button" class="remove-file-btn p-2 text-gray-400 hover:text-red-600 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500">
-                        <svg class="w-5 h-5" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002 2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
-                    </button>
+                            <!-- Predictions Card -->
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                                <h2 class="text-xl font-semibold text-gray-900">Chemotaxonomic Predictions</h2>
+                                <div class="mt-4 space-y-4">
+                                    <template x-if="results.predictions.length === 0">
+                                        <p class="text-gray-600">No predictions met the required confidence threshold.</p>
+                                    </template>
+                                    <template x-for="prediction in results.predictions" :key="prediction.id">
+                                        <div class="p-4 border border-gray-200 rounded-lg">
+                                            <div class="flex justify-between items-center mb-1">
+                                                <h3 class="text-lg font-medium text-blue-700" x-text="prediction.name"></h3>
+                                                <span class="px-2 py-0.5 rounded-full text-sm font-medium" 
+                                                      :class="{
+                                                          'bg-green-100 text-green-800': prediction.confidence >= 70,
+                                                          'bg-yellow-100 text-yellow-800': prediction.confidence >= 30 && prediction.confidence < 70,
+                                                          'bg-red-100 text-red-800': prediction.confidence < 30
+                                                      }"
+                                                      x-text="`${prediction.confidence}% Conf.`"></span>
+                                            </div>
+                                            <p class="text-sm text-gray-600 italic" x-text="`IJSEM Note: ${prediction.ijsem}`"></p>
+                                            <p class="mt-2 text-sm text-gray-700">
+                                                <span class="font-medium">Matched Markers:</span>
+                                                <span x-text="prediction.matchedMarkers.join(', ')"></span>
+                                            </p>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+
+                            <!-- Marker Findings Card -->
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                                <h2 class="text-xl font-semibold text-gray-900">Marker Findings</h2>
+                                <div class="mt-4 space-y-5">
+                                    <template x-if="Object.keys(results.foundMarkers).length === 0">
+                                        <p class="text-gray-600">No markers were found matching the database.</p>
+                                    </template>
+                                    <template x-for="category in Object.keys(results.foundMarkers)" :key="category">
+                                        <div class="space-y-3">
+                                            <h3 class="text-lg font-semibold text-gray-800" x-text="results.foundMarkers[category].name"></h3>
+                                            <div class="space-y-4">
+                                                <template x-for="subcategory in Object.keys(results.foundMarkers[category].subcategories)" :key="subcategory">
+                                                    <div class="p-3 bg-gray-50 rounded-md border border-gray-200">
+                                                        <div class="flex justify-between items-center text-sm">
+                                                            <span class="font-medium text-gray-700" x-text="subcategory"></span>
+                                                            <span class="text-gray-600" x-text="`${results.foundMarkers[category].subcategories[subcategory].percentage}% (${results.foundMarkers[category].subcategories[subcategory].found.length} / ${results.foundMarkers[category].subcategories[subcategory].total})`"></span>
+                                                        </div>
+                                                        <div class="mt-2 w-full bg-gray-200 rounded-full h-2.5">
+                                                            <div class="bg-blue-600 h-2.5 rounded-full" :style="`width: ${results.foundMarkers[category].subcategories[subcategory].percentage}%`"></div>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                            
+                            <!-- Notable Features Card -->
+                            <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
+                                <h2 class="text-xl font-semibold text-gray-900">Notable Features</h2>
+                                <div class="mt-4 space-y-3">
+                                    <template x-if="results.novelFeatures.length === 0">
+                                        <p class="text-gray-600">No features flagged at current thresholds.</p>
+                                    </template>
+                                    <template x-for="feature in results.novelFeatures" :key="feature.type">
+                                        <div class="p-4 border border-gray-200 rounded-lg">
+                                            <h3 class="font-medium text-gray-800" x-text="feature.type"></h3>
+                                            <p class="text-sm text-gray-600" x-text="feature.description"></p>
+                                            <ul class="mt-2 list-disc list-inside space-y-1 text-sm">
+                                                <template x-for="item in feature.features" :key="item.subcategory">
+                                                    <li x-text="`${item.category} / ${item.subcategory}: ${item.percentage}%`"></li>
+                                                </template>
+                                            </ul>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
                 </div>
             </div>
         </div>
-    </template>
-
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const fileList = document.getElementById('file-list');
-            const addFileBtn = document.getElementById('add-file-btn');
-            const fileRowTemplate = document.getElementById('file-row-template');
-            
-            const phylumInput = document.getElementById('phylum-input');
-            const analyzeBtn = document.getElementById('analyze-btn');
-            const reportBtn = document.getElementById('report-btn');
-            
-            const messageBox = document.getElementById('message-box');
-            const jsonOutput = document.getElementById('json-output');
-
-            // --- Config ---
-            // The API_BASE_URL is now just a relative path ('')
-            // because the HTML page and the API are served from the SAME server.
-            const API_BASE_URL = ''; 
-            // --- End Config ---
-
-            const addNewFileRow = () => {
-                const clone = fileRowTemplate.content.cloneNode(true);
-                const fileRow = clone.querySelector('.file-row');
-                const removeBtn = clone.querySelector('.remove-file-btn');
-                
-                removeBtn.addEventListener('click', () => {
-                    fileRow.remove();
-                    updateRemoveButtonVisibility();
-                });
-                
-                fileList.appendChild(clone);
-                updateRemoveButtonVisibility();
-            };
-
-            const updateRemoveButtonVisibility = () => {
-                const rows = fileList.querySelectorAll('.file-row');
-                rows.forEach((row, index) => {
-                    const removeBtn = row.querySelector('.remove-file-btn');
-                    if (index === 0 && rows.length === 1) {
-                        removeBtn.classList.add('hidden'); // Hide remove button if only one row
-                    } else {
-                        removeBtn.classList.remove('hidden');
-                    }
-                });
-            };
-
-            const showMessage = (message, type = 'error') => {
-                messageBox.textContent = message;
-                messageBox.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700');
-                if (type === 'error') {
-                    messageBox.classList.add('bg-red-100', 'text-red-700');
-                } else if (type === 'success') {
-                    messageBox.classList.add('bg-green-100', 'text-green-700');
-                }
-                // Scroll to message
-                messageBox.scrollIntoView({ behavior: 'smooth' });
-            };
-
-            const hideMessage = () => {
-                messageBox.classList.add('hidden');
-                messageBox.textContent = '';
-            };
-
-            const setButtonsLoading = (isLoading) => {
-                const buttons = [analyzeBtn, reportBtn];
-                buttons.forEach(btn => {
-                    const spinner = btn.querySelector('.spinner');
-                    if (isLoading) {
-                        btn.disabled = true;
-                        btn.classList.add('opacity-75', 'cursor-not-allowed');
-                        spinner.classList.remove('hidden');
-                    } else {
-                        btn.disabled = false;
-                        btn.classList.remove('opacity-75', 'cursor-not-allowed');
-                        spinner.classList.add('hidden');
-                    }
-                });
-            };
-
-            const buildFormData = () => {
-                const formData = new FormData();
-                const fileRows = fileList.querySelectorAll('.file-row');
-                let fileCount = 0;
-                
-                for (const row of fileRows) {
-                    const fileInput = row.querySelector('.file-input');
-                    const formatSelect = row.querySelector('.format-select');
-                    
-                    if (fileInput.files.length > 0 && formatSelect.value) {
-                        formData.append('files', fileInput.files[0]);
-                        formData.append('formats', formatSelect.value);
-                        fileCount++;
-                    } else if (fileInput.files.length > 0 && !formatSelect.value) {
-                        throw new Error(`Please select a format for the file: ${fileInput.files[0].name}`);
-                    }
-                }
-
-                if (fileCount === 0) {
-                    throw new Error('Please add at least one file and select its format.');
-                }
-                
-                const phylum = phylumInput.value.trim();
-                if (phylum) {
-                    formData.append('phylum', phylum);
-                }
-                
-                return formData;
-            };
-
-            const handleAnalyze = async () => {
-                hideMessage();
-                setButtonsLoading(true);
-                jsonOutput.textContent = 'Analyzing...';
-                jsonOutput.classList.remove('text-green-300', 'text-red-300');
-                
-                try {
-                    const formData = buildFormData();
-                    // The path is now relative to the current page.
-                    // e.g., 'api/analyze-multi'
-                    const response = await fetch(`${API_BASE_URL}api/analyze-multi`, {
-                        method: 'POST',
-                        body: formData,
-                    });
-
-                    const result = await response.json();
-                    
-                    if (!response.ok) {
-                        throw new Error(result.error || `Server error: ${response.status}`);
-                    }
-                    
-                    jsonOutput.textContent = JSON.stringify(result, null, 2);
-                    jsonOutput.classList.add('text-green-300');
-                    showMessage('Analysis complete!', 'success');
-                    
-                } catch (error) {
-                    console.error('Analysis error:', error);
-                    showMessage(`Analysis failed: ${error.message}`, 'error');
-                    jsonOutput.textContent = `Error: ${error.message}`;
-                    jsonOutput.classList.add('text-red-300');
-                } finally {
-                    setButtonsLoading(false);
-                }
-            };
-            
-            const handleReport = async () => {
-                hideMessage();
-                setButtonsLoading(true);
-
-                try {
-                    const formData = buildFormData();
-                    // The path is now relative to the current page.
-                    // e.g., 'api/analyze-and-report'
-                    const response = await fetch(`${API_BASE_URL}api/analyze-and-report`, {
-                        method: 'POST',
-                        body: formData,
-                    });
-                    
-                    if (!response.ok) {
-                        // Try to parse error JSON
-                        let errorMsg = `Server error: ${response.status}`;
-                        try {
-                            const errResult = await response.json();
-                            errorMsg = errResult.error || errorMsg;
-                        } catch (e) { /* Not a JSON error */ }
-                        throw new Error(errorMsg);
-                    }
-                    
-                    // Get filename from Content-Disposition header
-                    const disposition = response.headers.get('content-disposition');
-                    let filename = 'chemotax_report.md';
-                    if (disposition && disposition.indexOf('attachment') !== -1) {
-                        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-                        const matches = filenameRegex.exec(disposition);
-                        if (matches != null && matches[1]) {
-                            filename = matches[1].replace(/['"]/g, '');
-                        }
-                    }
-
-                    const blob = await response.blob();
-                    
-                    // Create a link to download the file
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.style.display = 'none';
-                    a.href = url;
-                    a.download = filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-    
-                    a.remove();
-                    
-                    showMessage('Report download started.', 'success');
-                    
-                } catch (error) {
-                    console.error('Report error:', error);
-                    showMessage(`Report failed: ${error.message}`, 'error');
-                } finally {
-                    setButtonsLoading(false);
-                }
-            };
-
-            // Add event listeners
-            addFileBtn.addEventListener('click', addNewFileRow);
-            analyzeBtn.addEventListener('click', handleAnalyze);
-            reportBtn.addEventListener('click', handleReport);
-
-            // Add the first file row on load
-            addNewFileRow();
-        });
-    </script>
+    </div>
 </body>
 </html>
