@@ -15,13 +15,13 @@ RUN pip install -r requirements.txt
 
 # Copy all application files into the /app directory
 COPY backend_api.py .
-COPY gunicorn.conf.py .
 COPY index.html .
+# We DO NOT copy gunicorn.conf.py anymore
 
-# Expose the port Gunicorn will run on
-EXPOSE 5000
+# Expose the port Gunicorn will run on (this is just metadata)
+EXPOSE 10000
 
 # Start Gunicorn
-# This is the command that a hosting service will use.
-CMD ["gunicorn", "-c", "gunicorn.conf.py", "backend_api:app"]
-
+# This command directly uses the $PORT variable provided by Render.
+# This is more reliable.
+CMD gunicorn --bind 0.0.0.0:$PORT --workers 3 --threads 2 --timeout 180 backend_api:app
