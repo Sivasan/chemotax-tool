@@ -165,28 +165,60 @@ class AnnotationParser:
     @staticmethod
     def parse_hmmer(content):
         genes = []
-        # Assumes HMMER domtblout-like columns (23+), but is lenient.
         for line in content.split('\n'):
             if line.startswith('#') or not line.strip():
                 continue
             fields = line.strip().split()
-            if len(fields) < 7:
-                continue
-            target_name = fields[0]
-            target_acc = fields[1] if len(fields) > 1 else ''
-            query_name = fields[3] if len(fields) > 3 else target_name
-            try:
-                evalue = float(fields[6]) if len(fields) > 6 else 1.0
-            except Exception:
-                evalue = 1.0
+
+            # Heuristic detection of format
+            # domtblout has at least 22 columns. tblout has at least 18.
+            # domtblout col 2 is tlen (int). tblout col 2 is query name (string).
+
+            is_domtblout = False
+            if len(fields) >= 22:
+                try:
+                    int(fields[2]) # tlen
+                    is_domtblout = True
+                except ValueError:
+                    pass
+
+            if is_domtblout:
+                # domtblout indices
+                target_name = fields[0]
+                target_acc = fields[1]
+                query_name = fields[3]
+                try:
+                    evalue = float(fields[6])
+                except Exception:
+                    evalue = 1.0
+                try:
+                    score = float(fields[7])
+                except Exception:
+                    score = 0.0
+                product = ' '.join(fields[22:])
+            else:
+                # tblout indices
+                if len(fields) < 18: continue
+                target_name = fields[0]
+                target_acc = fields[1]
+                query_name = fields[2]
+                try:
+                    evalue = float(fields[4])
+                except Exception:
+                    evalue = 1.0
+                try:
+                    score = float(fields[5])
+                except Exception:
+                    score = 0.0
+                product = ' '.join(fields[18:])
+
             pfam_acc = target_acc if target_acc.startswith('PF') else ''
-            product = ' '.join(fields[22:]) if len(fields) > 22 else ''
             genes.append({
                 'target_name': target_name,
                 'target_accession': target_acc,
                 'query_name': query_name,
                 'evalue': evalue,
-                'score': float(fields[7]) if len(fields) > 7 else 0.0,
+                'score': score,
                 'product': product,
                 'gene': query_name,
                 'pfam': pfam_acc,
@@ -249,6 +281,59 @@ class AnnotationParser:
                 genes.append(gene_info)
         except Exception as e:
             print(f"Error parsing TSV: {e}")
+        return genes
+
+    @staticmethod
+    def parse_fasta(content):
+        genes = []
+        try:
+            handle = io.StringIO(content)
+            for record in SeqIO.parse(handle, "fasta"):
+                # Header format varies:
+                # >ID product
+                # >ID [gene=...] [protein=...] (NCBI style)
+                # >ID ... product=... (Prokka style sometimes)
+
+                desc = record.description
+                # Remove ID from description if present at start
+                if desc.startswith(record.id):
+                    desc = desc[len(record.id):].strip()
+
+                gene = ''
+                product = desc
+                ec_number = ''
+
+                # Try parsing attributes like [gene=X] or product=Y
+                # NCBI style
+                m_gene = re.search(r'\[gene=([^\]]+)\]', desc)
+                if m_gene:
+                    gene = m_gene.group(1)
+
+                m_prod = re.search(r'\[protein=([^\]]+)\]', desc) # NCBI
+                if m_prod:
+                    product = m_prod.group(1)
+                else:
+                    # Prokka style: product=...
+                    m_prod_pk = re.search(r'product=(.+?)(?:;|$)', desc)
+                    if m_prod_pk:
+                        product = m_prod_pk.group(1)
+
+                # EC number?
+                m_ec = re.search(r'\[EC_number=([^\]]+)\]', desc) # NCBI sometimes
+                if not m_ec:
+                    m_ec = re.search(r'EC_number=([\d\.-]+)', desc)
+                if m_ec:
+                    ec_number = m_ec.group(1)
+
+                genes.append({
+                    'id': record.id,
+                    'gene': gene,
+                    'product': product,
+                    'ec_number': ec_number,
+                    'format': 'fasta'
+                })
+        except Exception as e:
+            print(f"Error parsing FASTA: {e}")
         return genes
 
 # -----------------------------------------------------------------------------
@@ -825,7 +910,14 @@ def _normalize_phylum_param(raw_val: Optional[str]) -> Optional[List[str]]:
 def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
     parser = AnnotationParser()
     detector = MarkerDetector()
-    all_genes, file_info = [], []
+
+    all_genes = []
+    file_info = []
+
+    # Store genes per file for individual analysis
+    # Structure: [{'name': 'f1', 'genes': [...]}, ...]
+    files_genes_map = []
+
     for file, format_type in zip(files, formats):
         try:
             content = file.read().decode('utf-8', errors='replace')
@@ -849,19 +941,66 @@ def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
             genes = parser.parse_genbank(content)
         elif ft == 'tsv':
             genes = parser.parse_generic_tsv(content)
+        elif ft in ['fasta', 'faa', 'fa']:
+            genes = parser.parse_fasta(content)
         else:
             return {'error': f'Unsupported format: {format_type} for {filename}'}
 
         all_genes.extend(genes)
         file_info.append({'name': filename, 'format': ft, 'geneCount': len(genes)})
+        files_genes_map.append({'name': filename, 'genes': genes})
 
     if not all_genes:
         return {'error': "No features could be parsed from the uploaded files. Please check file formats."}
 
     allowed_taxa = _normalize_phylum_param(phylum_param)
+
+    # 1. Combined analysis
     found_markers = detector.find_markers(all_genes, allowed_taxa=allowed_taxa)
     predictions = generate_predictions(found_markers)
     novel_features = identify_novel_features(found_markers)
+
+    # 2. Individual analysis stats
+    individual_results = []
+    # Collect all found marker IDs (e.g., 'menF', 'EC:1.2.3.4') from combined result to verify coverage
+    combined_marker_ids = set()
+    for cat in found_markers.values():
+        for sub in cat['subcategories'].values():
+            combined_marker_ids.update(sub['found'])
+
+    for entry in files_genes_map:
+        f_name = entry['name']
+        f_genes = entry['genes']
+        # Run detector
+        f_markers = detector.find_markers(f_genes, allowed_taxa=allowed_taxa)
+
+        # Count markers found
+        f_found_ids = set()
+        for cat in f_markers.values():
+            for sub in cat['subcategories'].values():
+                f_found_ids.update(sub['found'])
+
+        # Comparison with combined
+        # Let's just store the count and list of found markers.
+
+        individual_results.append({
+            'name': f_name,
+            'marker_count': len(f_found_ids),
+            'markers': list(f_found_ids)
+        })
+
+    # 3. Calculate "Cumulative Gain" or "Contribution"
+    # Which markers were found by combining that wouldn't be found if we just took the best single file?
+    max_single_file_count = max([r['marker_count'] for r in individual_results]) if individual_results else 0
+    combined_count = len(combined_marker_ids)
+    gain = combined_count - max_single_file_count
+
+    stats = {
+        'combined_count': combined_count,
+        'max_single_count': max_single_file_count,
+        'gain': gain,
+        'individual': individual_results
+    }
 
     result = {
         'files': file_info,
@@ -870,7 +1009,8 @@ def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
         'predictions': predictions,
         'novelFeatures': novel_features,
         'timestamp': datetime.now().isoformat(),
-        'phylum': allowed_taxa
+        'phylum': allowed_taxa,
+        'stats': stats
     }
     return result
 
@@ -900,6 +1040,21 @@ def _build_template_report(result: dict) -> str:
     for f in result['files']:
         lines.append(f"- **{f['name']}** ({f['format']}): {f['geneCount']} features")
     lines.append(f"\nA total of **{result['totalGenes']} features** were parsed and analyzed.")
+
+    # Source Comparison Section
+    stats = result.get('stats')
+    if stats:
+        lines.append("\n### 2.1. Multi-Source Contribution Analysis")
+        lines.append("By combining annotations from multiple tools, we achieved a more complete chemotaxonomic profile.")
+        lines.append(f"- **Combined Unique Markers:** {stats['combined_count']}")
+        lines.append(f"- **Best Single Source:** {stats['max_single_count']} markers")
+        lines.append(f"- **Cumulative Gain:** +{stats['gain']} markers ({(stats['gain']/stats['max_single_count']*100 if stats['max_single_count'] else 0):.1f}% increase)")
+
+        lines.append("\n| Source File | Marker Count | Contribution |")
+        lines.append("|---|---|---|")
+        for res in stats['individual']:
+            # contribution = unique to this file? Or just raw count? Raw count is simpler.
+            lines.append(f"| {res['name']} | {res['marker_count']} | {(res['marker_count']/stats['combined_count']*100 if stats['combined_count'] else 0):.1f}% of total |")
 
     lines.append("\n## 3. Results & Discussion")
     lines.append("\n### 3.1. Chemotaxonomic Predictions")
@@ -963,9 +1118,15 @@ def _generate_ai_report(result: dict) -> str:
             'phylum_filter': result.get('phylum', 'None'),
             'predictions': result.get('predictions', []),
             'marker_findings': result.get('foundMarkers', {}),
-            'notable_features': result.get('novelFeatures', [])
+            'notable_features': result.get('novelFeatures', []),
+            'stats': result.get('stats', {})
         }
-        user_prompt = f"Generate a full chemotaxonomy report for this JSON:\n\n{json.dumps(prompt_data, indent=2)}"
+        user_prompt = (
+            f"Generate a full chemotaxonomy report for this JSON. "
+            f"Explicitly discuss the value of the multi-annotation approach using the 'stats' block, "
+            f"highlighting how combining {len(result.get('files', []))} sources improved the result (Cumulative Gain). "
+            f"JSON:\n\n{json.dumps(prompt_data, indent=2)}"
+        )
         payload = {
             "contents": [{"parts": [{"text": user_prompt}]}],
             "systemInstruction": {"parts": [{"text": system_prompt}]}
@@ -1063,6 +1224,10 @@ def analyze_and_report():
         )
         print("Pandoc conversion successful.")
 
+        # Read into memory
+        with open(out_file_path, 'rb') as f:
+            file_data = io.BytesIO(f.read())
+
         mimetype_map = {
             'pdf': 'application/pdf',
             'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -1070,7 +1235,7 @@ def analyze_and_report():
         fname = f"chemotax_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{req_format}"
 
         return send_file(
-            out_file_path,
+            file_data,
             mimetype=mimetype_map[req_format],
             as_attachment=True,
             download_name=fname

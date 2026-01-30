@@ -1,17 +1,24 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-gray-50">
+<html lang="en" class="h-full bg-slate-50">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Genome-Resolved Chemotaxonomy</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
+    body { font-family: 'Inter', sans-serif; }
+    [x-cloak] { display: none !important; }
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     .spinner { animation: spin 1s linear infinite; }
-    #file-list::-webkit-scrollbar { display: none; }
-    #file-list { -ms-overflow-style: none; scrollbar-width: none; }
-    details > summary::-webkit-details-marker { display:none; }
+    /* Custom scrollbar for file list */
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
   </style>
   <script>
     function chemotaxApp() {
@@ -21,9 +28,10 @@
         if (n.endsWith('.gbk') || n.endsWith('.gbff')) return 'gbk';
         if (n.includes('bakta') && n.endsWith('.tsv')) return 'bakta';
         if (n.includes('dram') && (n.endsWith('.tsv') || n.endsWith('.csv'))) return 'dram';
-        if (n.endsWith('.tblout') || n.includes('hmmer') || n.endsWith('.hmm')) return 'hmm';
+        if (n.endsWith('.tblout') || n.endsWith('.domtblout') || n.includes('hmmer') || n.endsWith('.hmm')) return 'hmm';
         if (n.includes('rast') && n.endsWith('.tsv')) return 'rast';
         if (n.endsWith('.tsv')) return 'tsv';
+        if (n.endsWith('.faa') || n.endsWith('.fasta')) return 'fasta';
         return '';
       };
 
@@ -50,10 +58,8 @@
 
       return {
         files: [],
-        // Free-text fallback AND a multi-select:
         phylum: '',
         phylumSel: [],
-        showPhylumMenu: false,
         PHYLUM_OPTIONS,
 
         isLoading: false,
@@ -62,23 +68,49 @@
         error: null,
         results: null,
         apiBaseUrl: '/api',
+        dragOver: false,
 
         handleFileSelect(event) {
+          this.processFiles(event.target.files);
+          event.target.value = null; // Reset input
+        },
+
+        handleDrop(event) {
+            this.dragOver = false;
+            this.processFiles(event.dataTransfer.files);
+        },
+
+        processFiles(fileList) {
           this.error = null;
-          this.results = null;
-          const picked = Array.from(event.target.files).map(file => ({
+          // Don't reset results immediately on add, allow appending?
+          // Actually, let's keep it simple: new files means new analysis context usually.
+          // But user might add files one by one. Let's keep results until 'Analyze' is clicked.
+
+          const picked = Array.from(fileList).map(file => ({
             fileObject: file,
             name: file.name,
             size: file.size,
             format: guessFormat(file.name)
           }));
-          this.files = [...this.files, ...picked];
-          event.target.value = null;
+
+          // Avoid duplicates by name
+          const existingNames = new Set(this.files.map(f => f.name));
+          const uniquePicked = picked.filter(f => !existingNames.has(f.name));
+
+          this.files = [...this.files, ...uniquePicked];
         },
+
         removeFile(index) { this.files.splice(index, 1); },
 
+        resetAnalysis() {
+            this.files = [];
+            this.results = null;
+            this.error = null;
+            this.phylum = '';
+            this.phylumSel = [];
+        },
+
         selectedPhylumString() {
-          // Multi-select takes precedence; fallback to free-text
           return this.phylumSel.length ? this.phylumSel.join(', ') : (this.phylum || '');
         },
 
@@ -111,6 +143,10 @@
               throw new Error(msg);
             }
             this.results = await response.json();
+            // Scroll to results
+            this.$nextTick(() => {
+                document.getElementById('results-section').scrollIntoView({ behavior: 'smooth' });
+            });
           } catch (err) {
             this.error = `Analysis failed: ${err.message}`;
             console.error(err);
@@ -127,11 +163,6 @@
             this.error = 'Please add files before downloading a report.';
             this.isDownloading = false; return;
           }
-          if (this.files.some(f => !f.format)) {
-            this.error = 'Please select a format for every file.';
-            this.isDownloading = false; return;
-          }
-
           const formData = new FormData();
           this.files.forEach(f => {
             formData.append('files', f.fileObject, f.name);
@@ -169,258 +200,373 @@
     }
   </script>
 </head>
-<body class="h-full font-sans text-gray-800">
-  <div x-data="chemotaxApp()" class="min-h-screen p-4 md:p-8 bg-gray-50">
-    <div class="max-w-6xl mx-auto">
-      <!-- Header -->
-      <header class="mb-8 p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-        <div class="flex flex-col md:flex-row justify-between items-center">
-          <div>
-            <h1 class="text-3xl font-bold text-gray-900">Genome-Resolved Chemotaxonomy</h1>
-            <p class="mt-1 text-lg text-gray-600">Analyze genome annotations to predict chemotaxonomic markers.</p>
+<body class="h-full font-sans text-slate-800 antialiased selection:bg-indigo-100 selection:text-indigo-700">
+  <div x-data="chemotaxApp()" class="min-h-screen flex flex-col">
+
+    <!-- Hero Header -->
+    <header class="bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 md:py-16">
+        <div class="flex flex-col md:flex-row justify-between items-center md:items-start gap-6">
+          <div class="max-w-2xl">
+            <h1 class="text-3xl md:text-5xl font-bold tracking-tight mb-4">Genome-Resolved Chemotaxonomy</h1>
+            <p class="text-indigo-100 text-lg md:text-xl font-light leading-relaxed">
+              Unlock the chemical potential of your microbial genomes. Upload annotations to predict chemotaxonomic markers with high precision.
+            </p>
           </div>
-          <svg class="w-16 h-16 text-blue-600 mt-4 md:mt-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M11.35 3.836c-.065.22-.1.448-.1.684 0 .414.04.818.115 1.206l-1.64 1.64a.25.25 0 00-.06.177l-.096 1.123a.25.25 0 01.059.212l1.64 1.64a.25.25 0 00.177.06l1.123-.096a.25.25 0 00.212-.059l1.64-1.64c.388.075.792.115 1.206.115.236 0 .464-.035.684-.1l1.64-1.64a.25.25 0 00.06-.177l.096-1.123a.25.25 0 00-.059-.212l-1.64-1.64a.25.25 0 00-.177-.06l-1.123.096a.25.25 0 00-.212.059L12 3.951l-.65-.115z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M17.589 15.006l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15.006 17.589l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12.422 20.172l-2.05 2.05a.25.25 0 01-.353 0l-.096-.096a.25.25 0 010-.353l2.05-2.05a.25.25 0 01.353 0l.096.096a.25.25 0 010 .353z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19.75 10.25c.236 0 .464.035.684.1l1.64 1.64a.25.25 0 01.06.177l.096 1.123a.25.25 0 01-.059.212l-1.64 1.64a.25.25 0 01-.177.06l-1.123-.096a.25.25 0 01-.212-.059l-1.64-1.64c-.388-.075-.792-.115-1.206-.115-.236 0-.464.035-.684.1l-1.64 1.64a.25.25 0 01-.06.177l-.096 1.123a.25.25 0 01-.059.212l-1.64 1.64a.25.25 0 01-.177.06l-1.123-.096a.25.25 0 01-.212-.059L3.95 19.75l-.115.65c-.065.22-.1.448-.1.684 0 .414.04.818.115 1.206l-1.64 1.64a.25.25 0 01-.06.177l-.096 1.123a.25.25 0 01.059.212l1.64 1.64a.25.25 0 01.177.06l1.123-.096a.25.25 0 01.212-.059l1.64-1.64c.388.075.792.115 1.206.115.236 0 .464-.035.684-.1l1.64-1.64a.25.25 0 01.06-.177l.096-1.123a.25.25 0 01-.059-.212l-1.64-1.64a.25.25 0 00-.177-.06l-1.123.096a.25.25 0 00-.212-.059l-1.64 1.64c-.388.075-.792-.115-1.206-.115-.236 0-.464.035-.684-.1l-1.64-1.64a.25.25 0 00-.06-.177l-.096-1.123a.25.25 0 00-.059-.212l1.64-1.64a.25.25 0 00.177-.06l1.123.096a.25.25 0 00.212-.059L19.75 10.25z"/>
-          </svg>
-        </div>
-      </header>
-
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <!-- Left Column -->
-        <div class="lg:col-span-1 space-y-6">
-          <form @submit.prevent="submitAnalysis()" id="upload-form" class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-            <!-- Files -->
-            <div>
-              <label class="block text-sm font-medium text-gray-700">1. Add Annotation Files</label>
-              <div class="mt-2 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg">
-                <div class="space-y-1 text-center">
-                  <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
-                    <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.5-3.5M28 8v8h8m-4-4H12" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  <p class="text-sm text-gray-600">
-                    <label for="file-upload" class="relative cursor-pointer bg-white rounded-md font-medium text-blue-600 hover:text-blue-500">
-                      <span>Click to upload</span>
-                      <input id="file-upload" name="files" type="file" class="sr-only" multiple
-                             accept=".gff,.gff3,.gbk,.gbff,.tsv,.tblout,.hmm,.csv"
-                             @change="handleFileSelect">
-                    </label>
-                  </p>
-                  <p class="text-xs text-gray-500">GFF3, RAST, DRAM, HMM, GBK, TSV</p>
-                </div>
-              </div>
-            </div>
-
-            <!-- File List -->
-            <template x-if="files.length > 0">
-              <div class="mt-4 space-y-3 max-h-60 overflow-y-auto" id="file-list">
-                <template x-for="(file, index) in files" :key="index">
-                  <div class="flex items-center p-3 bg-gray-50 rounded-lg border border-gray-200">
-                    <div class="flex-1 min-w-0">
-                      <p class="text-sm font-medium text-gray-800 truncate" x-text="file.name"></p>
-                      <p class="text-xs text-gray-500" x-text="(file.size/1024).toFixed(1)+' KB'"></p>
-                    </div>
-                    <div class="ml-3">
-                      <select x-model="file.format" class="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm text-xs">
-                        <option value="">Select Format</option>
-                        <option value="gff3">GFF3 (Prokka)</option>
-                        <option value="gbk">GenBank (GBK)</option>
-                        <option value="rast">RAST (TSV)</option>
-                        <option value="bakta">Bakta (TSV)</option>
-                        <option value="dram">DRAM (TSV)</option>
-                        <option value="hmm">HMMER (tblout)</option>
-                        <option value="tsv">Generic TSV</option>
-                      </select>
-                    </div>
-                    <button @click="removeFile(index)" type="button" class="ml-2 p-1 text-gray-400 hover:text-gray-600" title="Remove">
-                      <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                      </svg>
-                    </button>
-                  </div>
-                </template>
-              </div>
-            </template>
-
-            <!-- Phylum Filter (Multi-select + Free-text) -->
-            <div class="mt-6 space-y-2">
-              <label class="block text-sm font-medium text-gray-700">2. Phylum Filter (Optional)</label>
-
-              <!-- Multi-select menu -->
-              <details class="relative">
-                <summary class="cursor-pointer select-none w-full rounded-md border border-gray-300 py-2 px-3 text-left bg-white">
-                  <span class="text-sm text-gray-700">
-                    <template x-if="phylumSel.length === 0">Select phyla…</template>
-                    <template x-if="phylumSel.length > 0"><span x-text="phylumSel.join(', ')"></span></template>
-                  </span>
-                </summary>
-                <div class="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-56 overflow-y-auto">
-                  <div class="p-2 space-y-1">
-                    <template x-for="opt in PHYLUM_OPTIONS" :key="opt.value">
-                      <label class="flex items-center space-x-2 text-sm px-2 py-1 rounded hover:bg-gray-50 cursor-pointer">
-                        <input type="checkbox" :value="opt.value" x-model="phylumSel" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                        <span x-text="opt.label"></span>
-                      </label>
-                    </template>
-                  </div>
-                </div>
-              </details>
-
-              <!-- Free-text fallback -->
-              <input type="text" x-model="phylum" class="block w-full rounded-md border-gray-300 shadow-sm text-sm"
-                     placeholder="Or type phyla: e.g., Proteobacteria, Actinobacteria">
-              <p class="text-xs text-gray-500">You can pick from the list above, type your own, or combine both.</p>
-            </div>
-
-            <!-- Analyze -->
-            <div class="mt-8 pt-5 border-t border-gray-200">
-              <button :disabled="isLoading || files.length === 0"
-                      type="submit"
-                      class="w-full inline-flex justify-center items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
-                <template x-if="isLoading">
-                  <svg class="spinner w-5 h-5 mr-2 -ml-1 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                </template>
-                <span x-text="isLoading ? 'Analyzing...' : 'Analyze & View Results'"></span>
-              </button>
-            </div>
-          </form>
-
-          <!-- Download -->
-          <div class="mt-6 p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-            <h3 class="text-lg font-medium text-gray-900">3. Download Report</h3>
-            <p class="mt-1 text-sm text-gray-600">Download the full analysis as a formatted report.</p>
-
-            <div class="mt-4 relative flex items-start">
-              <div class="flex items-center h-5">
-                <input id="ai-toggle" x-model="useAI" type="checkbox" class="focus:ring-blue-500 h-4 w-4 text-blue-600 border-gray-300 rounded">
-              </div>
-              <div class="ml-3 text-sm">
-                <label for="ai-toggle" class="font-medium text-gray-700">Use AI for enhanced report</label>
-                <p class="text-gray-500">Generates a full narrative. (May be slower)</p>
-              </div>
-            </div>
-
-            <div class="mt-5 pt-5 border-t border-gray-200 grid grid-cols-2 gap-3">
-              <button @click="downloadReport('pdf')" :disabled="isDownloading || files.length === 0"
-                      type="button"
-                      class="w-full inline-flex justify-center items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50">
-                <svg class="w-5 h-5 mr-2 -ml-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                Download .pdf
-              </button>
-              <button @click="downloadReport('docx')" :disabled="isDownloading || files.length === 0"
-                      type="button"
-                      class="w-full inline-flex justify-center items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50">
-                <svg class="w-5 h-5 mr-2 -ml-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                Download .docx
-              </button>
-            </div>
+          <div class="hidden md:block opacity-90">
+             <!-- Abstract Icon -->
+             <svg class="w-32 h-32 text-indigo-200" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+             </svg>
           </div>
-        </div>
-
-        <!-- Right Column: Results (unchanged from your version) -->
-        <div class="lg:col-span-2">
-          <template x-if="error">
-            <div class="p-4 bg-red-50 rounded-lg border border-red-300">
-              <h3 class="text-lg font-medium text-red-800">Error</h3>
-              <p class="mt-1 text-sm text-red-700" x-text="error"></p>
-            </div>
-          </template>
-
-          <template x-if="isLoading">
-            <div class="grid grid-cols-1 gap-6">
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200 animate-pulse"><div class="h-6 bg-gray-200 rounded-md w-1/3 mb-4"></div><div class="h-4 bg-gray-200 rounded-md w-1/2"></div></div>
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200 animate-pulse"><div class="h-6 bg-gray-200 rounded-md w-1/3 mb-4"></div><div class="h-4 bg-gray-200 rounded-md w-3/4 mb-2"></div><div class="h-4 bg-gray-200 rounded-md w-1/2"></div></div>
-            </div>
-          </template>
-
-          <template x-if="results && !isLoading">
-            <div class="space-y-6">
-              <!-- Summary -->
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-                <h2 class="text-xl font-semibold text-gray-900">Analysis Summary</h2>
-                <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div><span class="block text-sm text-gray-500">Input Files</span><span class="block text-lg font-medium text-gray-800" x-text="results.files.length"></span></div>
-                  <div><span class="block text-sm text-gray-500">Total Features Parsed</span><span class="block text-lg font-medium text-gray-800" x-text="results.totalGenes"></span></div>
-                  <div><span class="block text-sm text-gray-500">Phylum Filter</span><span class="block text-lg font-medium text-gray-800" x-text="results.phylum ? results.phylum.join(', ') : 'None'"></span></div>
-                </div>
-              </div>
-
-              <!-- Predictions -->
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-                <h2 class="text-xl font-semibold text-gray-900">Chemotaxonomic Predictions</h2>
-                <div class="mt-4 space-y-4">
-                  <template x-if="results.predictions.length === 0"><p class="text-gray-600">No predictions met the required confidence threshold.</p></template>
-                  <template x-for="prediction in results.predictions" :key="prediction.id">
-                    <div class="p-4 border border-gray-200 rounded-lg">
-                      <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-lg font-medium text-blue-700" x-text="prediction.name"></h3>
-                        <span class="px-2 py-0.5 rounded-full text-sm font-medium"
-                              :class="{'bg-green-100 text-green-800': prediction.confidence >= 70, 'bg-yellow-100 text-yellow-800': prediction.confidence >= 30 && prediction.confidence < 70, 'bg-red-100 text-red-800': prediction.confidence < 30}"
-                              x-text="`${prediction.confidence}% Conf.`"></span>
-                      </div>
-                      <p class="text-sm text-gray-600 italic" x-text="`IJSEM Note: ${prediction.ijsem}`"></p>
-                      <p class="mt-2 text-sm text-gray-700"><span class="font-medium">Matched Markers:</span> <span x-text="prediction.matchedMarkers.join(', ')"></span></p>
-                    </div>
-                  </template>
-                </div>
-              </div>
-
-              <!-- Marker Findings -->
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-                <h2 class="text-xl font-semibold text-gray-900">Marker Findings</h2>
-                <div class="mt-4 space-y-5">
-                  <template x-if="Object.keys(results.foundMarkers).length === 0"><p class="text-gray-600">No markers were found matching the database.</p></template>
-                  <template x-for="category in Object.keys(results.foundMarkers)" :key="category">
-                    <div class="space-y-3">
-                      <h3 class="text-lg font-semibold text-gray-800" x-text="results.foundMarkers[category].name"></h3>
-                      <div class="space-y-4">
-                        <template x-for="subcategory in Object.keys(results.foundMarkers[category].subcategories)" :key="subcategory">
-                          <div class="p-3 bg-gray-50 rounded-md border border-gray-200">
-                            <div class="flex justify-between items-center text-sm">
-                              <span class="font-medium text-gray-700" x-text="subcategory"></span>
-                              <span class="text-gray-600" x-text="`${results.foundMarkers[category].subcategories[subcategory].percentage}% (${results.foundMarkers[category].subcategories[subcategory].found.length} / ${results.foundMarkers[category].subcategories[subcategory].total})`"></span>
-                            </div>
-                            <div class="mt-2 w-full bg-gray-200 rounded-full h-2.5">
-                              <div class="bg-blue-600 h-2.5 rounded-full" :style="`width: ${results.foundMarkers[category].subcategories[subcategory].percentage}%`"></div>
-                            </div>
-                          </div>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
-
-              <!-- Notable Features -->
-              <div class="p-6 bg-white rounded-xl shadow-sm border border-gray-200">
-                <h2 class="text-xl font-semibold text-gray-900">Notable Features</h2>
-                <div class="mt-4 space-y-3">
-                  <template x-if="results.novelFeatures.length === 0"><p class="text-gray-600">No features flagged at current thresholds.</p></template>
-                  <template x-for="feature in results.novelFeatures" :key="feature.type">
-                    <div class="p-4 border border-gray-200 rounded-lg">
-                      <h3 class="font-medium text-gray-800" x-text="feature.type"></h3>
-                      <p class="text-sm text-gray-600" x-text="feature.description"></p>
-                      <ul class="mt-2 list-disc list-inside space-y-1 text-sm">
-                        <template x-for="item in feature.features" :key="item.subcategory">
-                          <li x-text="`${item.category} / ${item.subcategory}: ${item.percentage}%`"></li>
-                        </template>
-                      </ul>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </div>
-          </template>
         </div>
       </div>
+    </header>
 
-    </div>
+    <main class="flex-grow bg-slate-50 -mt-8">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-12">
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+          <!-- Input Column -->
+          <div class="lg:col-span-1 space-y-6">
+
+            <!-- Upload Card -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="p-6 border-b border-slate-100 bg-slate-50/50">
+                    <h2 class="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                        <span class="bg-indigo-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs">1</span>
+                        Upload Annotations
+                    </h2>
+                </div>
+
+                <div class="p-6 space-y-4">
+                    <!-- Drag & Drop Zone -->
+                    <div
+                        @dragover.prevent="dragOver = true"
+                        @dragleave.prevent="dragOver = false"
+                        @drop.prevent="handleDrop($event)"
+                        class="relative group border-2 border-dashed rounded-xl p-8 transition-all duration-200 ease-in-out text-center cursor-pointer"
+                        :class="dragOver ? 'border-indigo-500 bg-indigo-50/50 scale-[1.02]' : 'border-slate-300 hover:border-indigo-400 hover:bg-slate-50'"
+                    >
+                        <input id="file-upload" name="files" type="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" multiple
+                               accept=".gff,.gff3,.gbk,.gbff,.tsv,.tblout,.hmm,.csv,.faa,.fasta"
+                               @change="handleFileSelect">
+
+                        <div class="space-y-3 pointer-events-none">
+                             <div class="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto transition-transform group-hover:scale-110 duration-300">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                             </div>
+                             <div>
+                                <p class="text-sm font-medium text-slate-700">Click to browse or drag files here</p>
+                                <p class="text-xs text-slate-500 mt-1">Supports GFF3, GBK, TSV, HMMER, FASTA</p>
+                             </div>
+                        </div>
+                    </div>
+
+                    <!-- File List -->
+                    <template x-if="files.length > 0">
+                        <div class="bg-slate-50 rounded-xl border border-slate-200 p-1 max-h-[300px] overflow-y-auto custom-scrollbar">
+                            <ul class="divide-y divide-slate-200/50">
+                                <template x-for="(file, index) in files" :key="index">
+                                    <li class="p-3 flex flex-col sm:flex-row sm:items-center gap-3 transition hover:bg-white rounded-lg">
+                                        <!-- Icon based on format -->
+                                        <div class="shrink-0">
+                                            <span class="w-10 h-10 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-xs font-bold text-slate-500 uppercase tracking-wider shadow-sm" x-text="file.format || '?'"></span>
+                                        </div>
+
+                                        <div class="flex-1 min-w-0">
+                                            <p class="text-sm font-medium text-slate-900 truncate" x-text="file.name"></p>
+                                            <p class="text-xs text-slate-500" x-text="(file.size/1024).toFixed(1)+' KB'"></p>
+                                        </div>
+
+                                        <div class="flex items-center gap-2">
+                                            <select x-model="file.format" class="block w-32 rounded-md border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-xs py-1.5 pl-2 pr-6 bg-white">
+                                                <option value="">Format?</option>
+                                                <option value="gff3">GFF3</option>
+                                                <option value="gbk">GenBank</option>
+                                                <option value="rast">RAST</option>
+                                                <option value="bakta">Bakta</option>
+                                                <option value="dram">DRAM</option>
+                                                <option value="hmm">HMMER</option>
+                                                <option value="tsv">TSV</option>
+                                                <option value="fasta">FASTA</option>
+                                            </select>
+                                            <button @click="removeFile(index)" type="button" class="text-slate-400 hover:text-red-500 p-1 rounded-full hover:bg-red-50 transition">
+                                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                                            </button>
+                                        </div>
+                                    </li>
+                                </template>
+                            </ul>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Options Card -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="p-6 border-b border-slate-100 bg-slate-50/50">
+                    <h2 class="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                        <span class="bg-indigo-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs">2</span>
+                        Configure
+                    </h2>
+                </div>
+                <div class="p-6 space-y-5">
+                    <!-- Phylum Filter -->
+                    <div class="space-y-2">
+                        <label class="block text-sm font-medium text-slate-700">Phylum Filter (Optional)</label>
+                        <p class="text-xs text-slate-500 mb-2">Limit search to markers relevant to specific taxa.</p>
+
+                        <div class="relative">
+                            <details class="group relative">
+                                <summary class="list-none cursor-pointer w-full rounded-lg border border-slate-300 py-2.5 px-3 bg-white text-sm text-slate-700 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 flex justify-between items-center">
+                                    <span class="truncate block pr-4">
+                                        <template x-if="phylumSel.length === 0">Select taxa...</template>
+                                        <template x-if="phylumSel.length > 0"><span class="text-indigo-600 font-medium" x-text="phylumSel.join(', ')"></span></template>
+                                    </span>
+                                    <svg class="h-4 w-4 text-slate-400 transition-transform group-open:rotate-180" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                                </summary>
+                                <div class="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto p-2 space-y-1">
+                                    <template x-for="opt in PHYLUM_OPTIONS" :key="opt.value">
+                                        <label class="flex items-center space-x-3 p-2 rounded-md hover:bg-indigo-50 cursor-pointer transition">
+                                            <input type="checkbox" :value="opt.value" x-model="phylumSel" class="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4">
+                                            <span class="text-sm text-slate-700" x-text="opt.label"></span>
+                                        </label>
+                                    </template>
+                                </div>
+                            </details>
+                        </div>
+
+                        <div class="relative flex items-center">
+                            <div class="border-t border-slate-200 flex-grow"></div>
+                            <span class="px-2 text-xs text-slate-400 font-medium uppercase">Or</span>
+                            <div class="border-t border-slate-200 flex-grow"></div>
+                        </div>
+
+                        <input type="text" x-model="phylum"
+                               class="block w-full rounded-lg border-slate-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm py-2.5"
+                               placeholder="Type custom phyla (e.g. Proteobacteria)...">
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="pt-2">
+                        <button :disabled="isLoading || files.length === 0"
+                            @click="submitAnalysis()"
+                            type="button"
+                            class="w-full inline-flex justify-center items-center px-4 py-3 border border-transparent text-sm font-semibold rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 shadow-md hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed transform active:scale-95">
+                            <template x-if="isLoading">
+                                <svg class="spinner w-5 h-5 mr-2 -ml-1 text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                            </template>
+                            <span x-text="isLoading ? 'Analyzing...' : 'Analyze Genomes'"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Download Card (Only visible if has files) -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden" x-show="files.length > 0" x-transition.opacity>
+                <div class="p-6 border-b border-slate-100 bg-slate-50/50">
+                     <h2 class="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                        <span class="bg-indigo-600 text-white w-6 h-6 rounded-full flex items-center justify-center text-xs">3</span>
+                        Export
+                    </h2>
+                </div>
+                <div class="p-6">
+                    <div class="flex items-center mb-5 bg-indigo-50/50 p-3 rounded-lg border border-indigo-100">
+                        <input id="ai-toggle" x-model="useAI" type="checkbox" class="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded cursor-pointer">
+                        <label for="ai-toggle" class="ml-3 block text-sm font-medium text-slate-700 cursor-pointer">
+                            Enable AI Narrative <span class="text-xs font-normal text-slate-500 ml-1">(Generates full report text)</span>
+                        </label>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3">
+                        <button @click="downloadReport('pdf')" :disabled="isDownloading"
+                                class="inline-flex justify-center items-center px-4 py-2 border border-slate-300 shadow-sm text-sm font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 hover:text-indigo-600 transition disabled:opacity-50">
+                            <svg class="w-5 h-5 mr-2 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                            PDF
+                        </button>
+                        <button @click="downloadReport('docx')" :disabled="isDownloading"
+                                class="inline-flex justify-center items-center px-4 py-2 border border-slate-300 shadow-sm text-sm font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 hover:text-indigo-600 transition disabled:opacity-50">
+                            <svg class="w-5 h-5 mr-2 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                            DOCX
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+          </div>
+
+          <!-- Results Column -->
+          <div class="lg:col-span-2 space-y-6" id="results-section">
+
+            <!-- Error State -->
+            <div x-show="error" x-transition class="p-4 bg-red-50 rounded-xl border border-red-200 flex items-start gap-3">
+                <svg class="w-6 h-6 text-red-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <div>
+                    <h3 class="text-sm font-bold text-red-800">Analysis Error</h3>
+                    <p class="mt-1 text-sm text-red-700" x-text="error"></p>
+                </div>
+            </div>
+
+            <!-- Loading Skeleton -->
+            <template x-if="isLoading">
+                <div class="space-y-6">
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 animate-pulse">
+                        <div class="h-6 bg-slate-200 rounded w-1/4 mb-6"></div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="h-20 bg-slate-100 rounded-xl"></div>
+                            <div class="h-20 bg-slate-100 rounded-xl"></div>
+                            <div class="h-20 bg-slate-100 rounded-xl"></div>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 animate-pulse">
+                         <div class="h-6 bg-slate-200 rounded w-1/3 mb-4"></div>
+                         <div class="space-y-3">
+                            <div class="h-12 bg-slate-100 rounded-lg"></div>
+                            <div class="h-12 bg-slate-100 rounded-lg"></div>
+                         </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Results View -->
+            <template x-if="results && !isLoading">
+                <div class="space-y-8" x-transition.opacity.duration.500ms>
+
+                    <!-- Header with Reset -->
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-2xl font-bold text-slate-900">Analysis Results</h2>
+                        <button @click="resetAnalysis()" class="text-sm text-slate-500 hover:text-red-600 font-medium transition flex items-center gap-1">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                            Reset
+                        </button>
+                    </div>
+
+                    <!-- Key Stats Grid -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center">
+                            <span class="text-3xl font-bold text-indigo-600 mb-1" x-text="results.totalGenes.toLocaleString()"></span>
+                            <span class="text-sm text-slate-500 font-medium uppercase tracking-wide">Features Parsed</span>
+                        </div>
+                        <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center">
+                            <span class="text-3xl font-bold text-violet-600 mb-1" x-text="results.files.length"></span>
+                            <span class="text-sm text-slate-500 font-medium uppercase tracking-wide">Input Files</span>
+                        </div>
+                         <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center">
+                            <span class="text-3xl font-bold text-emerald-600 mb-1" x-text="results.stats ? '+' + results.stats.gain : '0'"></span>
+                            <span class="text-sm text-slate-500 font-medium uppercase tracking-wide">Combined Gain</span>
+                        </div>
+                    </div>
+
+                    <!-- Predictions Card -->
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div class="p-6 border-b border-slate-100 flex items-center gap-3">
+                             <div class="p-2 bg-indigo-100 text-indigo-600 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                             </div>
+                             <h3 class="text-xl font-bold text-slate-800">Chemotaxonomic Profile</h3>
+                        </div>
+                        <div class="p-6">
+                            <template x-if="results.predictions.length === 0">
+                                <div class="text-center py-8">
+                                    <p class="text-slate-500 italic">No high-confidence profiles detected based on current markers.</p>
+                                </div>
+                            </template>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <template x-for="prediction in results.predictions" :key="prediction.id">
+                                    <div class="p-5 border border-slate-200 rounded-xl hover:border-indigo-300 hover:shadow-md transition-all group bg-slate-50/50">
+                                        <div class="flex justify-between items-start mb-3">
+                                            <h4 class="font-bold text-slate-800 group-hover:text-indigo-700 transition" x-text="prediction.name"></h4>
+                                            <span class="px-2.5 py-1 rounded-full text-xs font-bold tracking-wide"
+                                                  :class="{
+                                                      'bg-emerald-100 text-emerald-700': prediction.confidence >= 70,
+                                                      'bg-amber-100 text-amber-700': prediction.confidence >= 30 && prediction.confidence < 70,
+                                                      'bg-rose-100 text-rose-700': prediction.confidence < 30
+                                                  }"
+                                                  x-text="`${prediction.confidence}%`"></span>
+                                        </div>
+                                        <p class="text-xs text-slate-500 mb-3 bg-white p-2 rounded border border-slate-100 shadow-sm inline-block" x-text="prediction.ijsem"></p>
+                                        <div class="text-xs text-slate-600">
+                                            <span class="font-semibold text-slate-400 uppercase text-[10px]">Key Markers:</span>
+                                            <span x-text="prediction.matchedMarkers.join(', ')"></span>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Marker Findings & Progress -->
+                    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                         <div class="p-6 border-b border-slate-100 flex items-center gap-3">
+                             <div class="p-2 bg-violet-100 text-violet-600 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                             </div>
+                             <h3 class="text-xl font-bold text-slate-800">Pathway Detection</h3>
+                        </div>
+                        <div class="p-6 space-y-8">
+                            <template x-if="Object.keys(results.foundMarkers).length === 0">
+                                <p class="text-slate-500 italic text-center py-4">No specific marker pathways detected.</p>
+                            </template>
+
+                            <template x-for="category in Object.keys(results.foundMarkers)" :key="category">
+                                <div>
+                                    <h4 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 border-b border-slate-100 pb-2" x-text="results.foundMarkers[category].name"></h4>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                                        <template x-for="subcategory in Object.keys(results.foundMarkers[category].subcategories)" :key="subcategory">
+                                            <div class="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                                <div class="flex justify-between items-center text-sm mb-2">
+                                                    <span class="font-medium text-slate-700 capitalize" x-text="subcategory.replace(/_/g, ' ')"></span>
+                                                    <span class="text-xs font-mono text-slate-500" x-text="`${results.foundMarkers[category].subcategories[subcategory].found.length}/${results.foundMarkers[category].subcategories[subcategory].total}`"></span>
+                                                </div>
+                                                <div class="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+                                                    <div class="bg-indigo-500 h-2 rounded-full transition-all duration-1000 ease-out"
+                                                         :style="`width: ${results.foundMarkers[category].subcategories[subcategory].percentage}%`"></div>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- Notable Features -->
+                    <template x-if="results.novelFeatures.length > 0">
+                        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden border-l-4 border-l-amber-400">
+                            <div class="p-6">
+                                <h3 class="text-lg font-bold text-slate-800 mb-2 flex items-center gap-2">
+                                    <svg class="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                                    Notable Observations
+                                </h3>
+                                <div class="grid grid-cols-1 gap-3">
+                                    <template x-for="feature in results.novelFeatures" :key="feature.type">
+                                        <div class="text-sm text-slate-600">
+                                            <span class="font-semibold text-slate-800" x-text="feature.type + ':'"></span>
+                                            <span x-text="feature.description"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                </div>
+            </template>
+
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="bg-white border-t border-slate-200 py-8">
+        <div class="max-w-7xl mx-auto px-4 text-center text-slate-400 text-sm">
+            <p>&copy; 2026 Chemotaxonomy Tool. All rights reserved.</p>
+        </div>
+    </footer>
   </div>
 </body>
 </html>
