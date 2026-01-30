@@ -24,6 +24,7 @@
         if (n.endsWith('.tblout') || n.endsWith('.domtblout') || n.includes('hmmer') || n.endsWith('.hmm')) return 'hmm';
         if (n.includes('rast') && n.endsWith('.tsv')) return 'rast';
         if (n.endsWith('.tsv')) return 'tsv';
+        if (n.endsWith('.faa') || n.endsWith('.fasta')) return 'fasta';
         return '';
       };
 
@@ -205,11 +206,11 @@
                     <label for="file-upload" class="relative cursor-pointer bg-white rounded-md font-medium text-blue-600 hover:text-blue-500">
                       <span>Click to upload</span>
                       <input id="file-upload" name="files" type="file" class="sr-only" multiple
-                             accept=".gff,.gff3,.gbk,.gbff,.tsv,.tblout,.hmm,.csv"
+                             accept=".gff,.gff3,.gbk,.gbff,.tsv,.tblout,.hmm,.csv,.faa,.fasta"
                              @change="handleFileSelect">
                     </label>
                   </p>
-                  <p class="text-xs text-gray-500">GFF3, RAST, DRAM, HMM, GBK, TSV</p>
+                  <p class="text-xs text-gray-500">GFF3, RAST, DRAM, HMM, GBK, TSV, FASTA</p>
                 </div>
               </div>
             </div>
@@ -233,6 +234,7 @@
                         <option value="dram">DRAM (TSV)</option>
                         <option value="hmm">HMMER (tblout)</option>
                         <option value="tsv">Generic TSV</option>
+                        <option value="fasta">Protein FASTA (.faa)</option>
                       </select>
                     </div>
                     <button @click="removeFile(index)" type="button" class="ml-2 p-1 text-gray-400 hover:text-gray-600" title="Remove">
