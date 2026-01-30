@@ -165,28 +165,60 @@ class AnnotationParser:
     @staticmethod
     def parse_hmmer(content):
         genes = []
-        # Assumes HMMER domtblout-like columns (23+), but is lenient.
         for line in content.split('\n'):
             if line.startswith('#') or not line.strip():
                 continue
             fields = line.strip().split()
-            if len(fields) < 7:
-                continue
-            target_name = fields[0]
-            target_acc = fields[1] if len(fields) > 1 else ''
-            query_name = fields[3] if len(fields) > 3 else target_name
-            try:
-                evalue = float(fields[6]) if len(fields) > 6 else 1.0
-            except Exception:
-                evalue = 1.0
+
+            # Heuristic detection of format
+            # domtblout has at least 22 columns. tblout has at least 18.
+            # domtblout col 2 is tlen (int). tblout col 2 is query name (string).
+
+            is_domtblout = False
+            if len(fields) >= 22:
+                try:
+                    int(fields[2]) # tlen
+                    is_domtblout = True
+                except ValueError:
+                    pass
+
+            if is_domtblout:
+                # domtblout indices
+                target_name = fields[0]
+                target_acc = fields[1]
+                query_name = fields[3]
+                try:
+                    evalue = float(fields[6])
+                except Exception:
+                    evalue = 1.0
+                try:
+                    score = float(fields[7])
+                except Exception:
+                    score = 0.0
+                product = ' '.join(fields[22:])
+            else:
+                # tblout indices
+                if len(fields) < 18: continue
+                target_name = fields[0]
+                target_acc = fields[1]
+                query_name = fields[2]
+                try:
+                    evalue = float(fields[4])
+                except Exception:
+                    evalue = 1.0
+                try:
+                    score = float(fields[5])
+                except Exception:
+                    score = 0.0
+                product = ' '.join(fields[18:])
+
             pfam_acc = target_acc if target_acc.startswith('PF') else ''
-            product = ' '.join(fields[22:]) if len(fields) > 22 else ''
             genes.append({
                 'target_name': target_name,
                 'target_accession': target_acc,
                 'query_name': query_name,
                 'evalue': evalue,
-                'score': float(fields[7]) if len(fields) > 7 else 0.0,
+                'score': score,
                 'product': product,
                 'gene': query_name,
                 'pfam': pfam_acc,
@@ -1063,6 +1095,10 @@ def analyze_and_report():
         )
         print("Pandoc conversion successful.")
 
+        # Read into memory
+        with open(out_file_path, 'rb') as f:
+            file_data = io.BytesIO(f.read())
+
         mimetype_map = {
             'pdf': 'application/pdf',
             'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -1070,7 +1106,7 @@ def analyze_and_report():
         fname = f"chemotax_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{req_format}"
 
         return send_file(
-            out_file_path,
+            file_data,
             mimetype=mimetype_map[req_format],
             as_attachment=True,
             download_name=fname

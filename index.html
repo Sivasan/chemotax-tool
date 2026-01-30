@@ -21,7 +21,7 @@
         if (n.endsWith('.gbk') || n.endsWith('.gbff')) return 'gbk';
         if (n.includes('bakta') && n.endsWith('.tsv')) return 'bakta';
         if (n.includes('dram') && (n.endsWith('.tsv') || n.endsWith('.csv'))) return 'dram';
-        if (n.endsWith('.tblout') || n.includes('hmmer') || n.endsWith('.hmm')) return 'hmm';
+        if (n.endsWith('.tblout') || n.endsWith('.domtblout') || n.includes('hmmer') || n.endsWith('.hmm')) return 'hmm';
         if (n.includes('rast') && n.endsWith('.tsv')) return 'rast';
         if (n.endsWith('.tsv')) return 'tsv';
         return '';

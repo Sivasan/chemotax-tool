@@ -4,3 +4,4 @@ biopython==1.83
 gunicorn==21.2.0
 requests==2.31.0
 pypandoc==1.13
+pytest
