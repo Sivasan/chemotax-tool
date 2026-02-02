@@ -935,9 +935,9 @@ def _analyze_uploaded(files, formats, phylum_param: Optional[str]):
             genes = parser.parse_bakta_tsv(content)
         elif ft == 'dram':
             genes = parser.parse_dram(content)
-        elif ft == 'hmm':
+        elif ft in ['hmm', 'tblout', 'domtblout']:
             genes = parser.parse_hmmer(content)
-        elif ft == 'gbk':
+        elif ft in ['gbk', 'gbff', 'genbank']:
             genes = parser.parse_genbank(content)
         elif ft == 'tsv':
             genes = parser.parse_generic_tsv(content)
@@ -1153,6 +1153,14 @@ def index():
             return render_template_string(f.read())
     except FileNotFoundError:
         return "index.html not found", 404
+
+@app.route('/manifest.json')
+def serve_manifest():
+    return send_file('manifest.json', mimetype='application/json')
+
+@app.route('/sw.js')
+def serve_sw():
+    return send_file('sw.js', mimetype='application/javascript')
 
 @app.route('/api/analyze-multi', methods=['POST'])
 def analyze_multiple_annotations():
